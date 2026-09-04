@@ -11,6 +11,7 @@ probe), not specific config snapshots.
 """
 
 import os
+import sys
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
@@ -241,6 +242,10 @@ class TestEmbeddedDaemonOverlayFlag:
         ), patch.object(
             cua_backend, "_cua_driver_supports_no_overlay", return_value=True,
         ), patch.object(
+            cua_backend, "_resolve_cua_driver_app_path", return_value="/Applications/CuaDriver.app",
+        ), patch.object(
+            cua_backend, "_validate_cua_driver_app_signature",
+        ), patch.object(
             cua_backend.subprocess, "Popen", return_value=process,
         ) as popen, patch.object(
             cua_backend.subprocess, "run", return_value=status,
@@ -248,5 +253,13 @@ class TestEmbeddedDaemonOverlayFlag:
             daemon.start()
 
         command = popen.call_args.args[0]
-        assert command[:2] == ["/usr/bin/cua-driver", "serve"]
-        assert "--no-overlay" in command
+        if sys.platform == "darwin":
+            assert command[:6] == [
+                "/usr/bin/open", "-n", "-g", "-a", "/Applications/CuaDriver.app", "--args",
+            ]
+            serve_command = command[6:]
+        else:
+            assert command[0] == "/usr/bin/cua-driver"
+            serve_command = command[1:]
+        assert serve_command[0] == "serve"
+        assert "--no-overlay" in serve_command

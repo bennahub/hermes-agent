@@ -2173,7 +2173,7 @@ class TestElementTokenAttachment:
        structuredContent.elements.
     2. Whenever an action carrying element_index is about to hit cua-driver,
        look up the matching token and attach it — but ONLY for tools that
-       advertise `accessibility.element_tokens` (Surface 4 gate). Older
+       advertise the input property or legacy capability. Older
        drivers reject unknown args via additionalProperties=false.
     3. cua-driver prefers token over index when both are supplied, so
        sending both is safe and stale-detection becomes explicit.
@@ -2196,6 +2196,7 @@ class TestElementTokenAttachment:
                 return cap in capabilities.get(tool, set())
             return any(cap in caps for caps in capabilities.values())
         backend._session.supports_capability = _supports
+        backend._session.supports_input_property.return_value = False
         backend._active_pid = 111
         backend._active_window_id = 222
         return backend

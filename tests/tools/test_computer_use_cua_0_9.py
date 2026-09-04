@@ -168,6 +168,30 @@ def test_foreground_focus_is_a_separate_call_before_action():
     assert "bring_to_front" not in action_args
 
 
+@pytest.mark.parametrize("tool", ["click", "set_value"])
+@pytest.mark.parametrize("schema_support", [True, False])
+def test_element_token_discovered_from_input_schema(tool, schema_support):
+    session = _FakeSession(
+        input_properties={tool: {"element_token"} if schema_support else set()}
+    )
+    backend = _make_backend(session)
+    backend._snapshot_tokens = {3: "opaque-fixture-element"}
+
+    result = (
+        backend.click(element=3)
+        if tool == "click"
+        else backend.set_value("fixture value", element=3)
+    )
+
+    assert result.ok is True
+    name, args = session.calls[-1]
+    assert name == tool
+    assert args["element_index"] == 3
+    assert args.get("element_token") == (
+        "opaque-fixture-element" if schema_support else None
+    )
+
+
 def test_foreground_refuses_only_when_schema_lacks_delivery_property():
     backend = _make_backend(_FakeSession())
 
@@ -387,4 +411,3 @@ def test_persistent_focus_has_a_separate_approval_scope():
     assert seen == ["click", "bring_to_front"]
     assert result["error"] == "denied by user"
     assert result["action"] == "bring_to_front"
-
