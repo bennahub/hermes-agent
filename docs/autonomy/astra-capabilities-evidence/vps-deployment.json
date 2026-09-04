@@ -1,0 +1,45 @@
+{
+  "reviewed_commit": "1a15b6f4a41af5b42210b2334e74945de9c0964b",
+  "profile_home": "/home/hermes/.hermes/profiles/hamad",
+  "timestamp_utc": "2026-09-04T23:09:29.149222+00:00",
+  "uid": 1000,
+  "gid": 1000,
+  "preflight_skills_absent": true,
+  "status": "installed",
+  "created_directories": [
+    "/home/hermes/.hermes/profiles/hamad/skills/productivity/telephony",
+    "/home/hermes/.hermes/profiles/hamad/skills/productivity/personal-operations",
+    "/home/hermes/.hermes/profiles/hamad/skills/productivity/telephony/scripts"
+  ],
+  "files": [
+    {
+      "relative_path": "productivity/telephony/scripts/telephony.py",
+      "path": "/home/hermes/.hermes/profiles/hamad/skills/productivity/telephony/scripts/telephony.py",
+      "sha256": "a546aae3ab3db3bc6bd5d513efe584a619d02c5d105a62ab36b42b5aaad184fa",
+      "mode": "0o644",
+      "uid": 1000,
+      "gid": 1000
+    },
+    {
+      "relative_path": "productivity/telephony/SKILL.md",
+      "path": "/home/hermes/.hermes/profiles/hamad/skills/productivity/telephony/SKILL.md",
+      "sha256": "c2e9392419caf40e34a300f4e2fcbcfe162a31e40894d9514b89f838a89e1e03",
+      "mode": "0o644",
+      "uid": 1000,
+      "gid": 1000
+    },
+    {
+      "relative_path": "productivity/personal-operations/SKILL.md",
+      "path": "/home/hermes/.hermes/profiles/hamad/skills/productivity/personal-operations/SKILL.md",
+      "sha256": "a7c435087fe4ed85d2139675b2abaaebf6b6dcd5afdb6974e0edcf2caec26464",
+      "mode": "0o644",
+      "uid": 1000,
+      "gid": 1000
+    }
+  ],
+  "config_changed": false,
+  "credentials_changed": false,
+  "restart": false,
+  "atomicity": "Exclusive directory reservation; no-clobber atomic file links; SKILL.md published last",
+  "rollback_policy": "Remove only receipt paths still matching reviewed digests; preserve changed files; remove only empty created directories"
+}

@@ -1,0 +1,106 @@
+{
+  "repo": "/Users/abdulrahman/.hermes/hermes-agent",
+  "profile": "/Users/abdulrahman/.hermes/profiles/hamad",
+  "native_discovery": [
+    {
+      "name": "personal-operations",
+      "description": "Book personal appointments using hosted or native surfaces.",
+      "category": "productivity"
+    },
+    {
+      "name": "telephony",
+      "description": "Call and text via Twilio, Wave, Bland, or Vapi.",
+      "category": "productivity"
+    }
+  ],
+  "native_views": {
+    "personal-operations": {
+      "success": true,
+      "error": false,
+      "keys": [
+        "_source_path",
+        "content",
+        "description",
+        "linked_files",
+        "metadata",
+        "missing_credential_files",
+        "missing_required_commands",
+        "missing_required_environment_variables",
+        "name",
+        "org_provenance",
+        "path",
+        "readiness_status",
+        "related_skills",
+        "required_commands",
+        "required_environment_variables",
+        "setup_needed",
+        "setup_skipped",
+        "skill_dir",
+        "success",
+        "tags",
+        "usage_hint"
+      ]
+    },
+    "telephony": {
+      "success": true,
+      "error": false,
+      "keys": [
+        "_source_path",
+        "content",
+        "description",
+        "linked_files",
+        "metadata",
+        "missing_credential_files",
+        "missing_required_commands",
+        "missing_required_environment_variables",
+        "name",
+        "org_provenance",
+        "path",
+        "readiness_status",
+        "related_skills",
+        "required_commands",
+        "required_environment_variables",
+        "setup_needed",
+        "setup_skipped",
+        "skill_dir",
+        "success",
+        "tags",
+        "usage_hint"
+      ]
+    }
+  },
+  "diagnose": {
+    "wave": {
+      "configured": false,
+      "key_kind": "missing",
+      "from_number_configured": false,
+      "external_gate": true,
+      "provider_verified": false,
+      "live_number": null
+    },
+    "twilio_account_configured": false,
+    "twilio_token_configured": false,
+    "bland_configured": false,
+    "vapi_configured": false
+  },
+  "installed_files": {
+    "productivity/telephony/scripts/telephony.py": {
+      "sha256": "a546aae3ab3db3bc6bd5d513efe584a619d02c5d105a62ab36b42b5aaad184fa",
+      "mode": "0o644",
+      "uid": 501,
+      "gid": 20
+    },
+    "productivity/telephony/SKILL.md": {
+      "sha256": "c2e9392419caf40e34a300f4e2fcbcfe162a31e40894d9514b89f838a89e1e03",
+      "mode": "0o644",
+      "uid": 501,
+      "gid": 20
+    },
+    "productivity/personal-operations/SKILL.md": {
+      "sha256": "a7c435087fe4ed85d2139675b2abaaebf6b6dcd5afdb6974e0edcf2caec26464",
+      "mode": "0o644",
+      "uid": 501,
+      "gid": 20
+    }
+  }
+}

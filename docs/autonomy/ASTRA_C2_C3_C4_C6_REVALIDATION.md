@@ -55,8 +55,9 @@ classification. A native architecture review cannot certify Owner authentication
 | E. human-only login / 2FA / CAPTCHA | Human Takeover on the same browser identity; native Mac checkpoint when applicable | Owner action/provider restrictions; no bypass, profile import or vault can prove this journey. |
 
 Read-only inventory covered 15 active profile homes including default on each
-host. Every `.env` and `auth.json` observed was mode 0600. Wave/HA variables and
-Google credential files were absent. No profile enabled 1Password, Bitwarden or
+host. Every `.env` and `auth.json` observed was mode 0600. Wave/HA variables were
+absent across those profiles; Google credential files were absent in Hamad on
+both hosts. No profile enabled 1Password, Bitwarden or
 real-browser-profile import. `op`, `bws`, `bw` absent; Apple Passwords app present
 on the Mac. Presence does not imply that a usable website password exists.
 [Local inventory](astra-capabilities-evidence/local-inventory.json),
@@ -276,8 +277,29 @@ confirmation and required Calendar step are demonstrated.
 - [Live native scope/HA/auth tests: 68 pass](astra-capabilities-evidence/c2-c4-live-tests.log).
 - [Repaired skill tests: 16 pass](astra-capabilities-evidence/c3-c6-final-tests.log).
 - Live health, inventories, LAN probes and vendor-browser journey described above.
-- This node agent implemented the delta; N0 must record independent exact-candidate
-  review and any repair/revalidation. No self-review is labeled external review.
-- Proposed deployment is additive installation of the reviewed skills for Hamad
-  only, with per-file rollback and no restart/config/credential changes. Skills
-  were absent on both hosts at inventory time; installation receipt belongs to N0.
+- External Claude Code review returned PASS for the exact frozen candidate
+  `1a15b6f4a41af5b42210b2334e74945de9c0964b`, with no material findings. It was
+  static source/test inspection: Bash was unavailable to that reviewer. N0
+  independently checked the frozen commit and retained the actual test runs
+  above; the external verdict is not described as an independent test execution.
+- After that review and N0 release coordination, three reviewed files were
+  installed additively for Hamad on both Mac and VPS on 2026-09-05 KSA. Both
+  skill directories were rechecked absent and reserved exclusively. Files were
+  published with atomic no-clobber links, helper before SKILL.md; all final
+  hashes match [the reviewed manifest](astra-capabilities-evidence/candidate-digests.json).
+  Files are mode 0644 and owned by the profile user: Mac UID/GID 501/20,
+  VPS 1000/1000. No config, credentials, repository product files or service
+  restarts were part of this installation.
+- Native discovery and skill_view succeeded for both skills using each host's
+  installed Hermes runtime. The installed helper's diagnose succeeded and
+  confirmed Wave key/from-number missing, provider_verified false and
+  external_gate true; Twilio/Bland/Vapi configuration was also absent. This
+  establishes installed preparation, not a live call or booking.
+- [Mac deployment](astra-capabilities-evidence/local-deployment.json),
+  [VPS deployment](astra-capabilities-evidence/vps-deployment.json),
+  [Mac native verification](astra-capabilities-evidence/local-install-verification.json),
+  [VPS native verification](astra-capabilities-evidence/vps-install-verification.json).
+  Receipts identify the exact installed paths and rollback policy: remove only
+  files still matching the reviewed digests, preserve changed paths, and remove
+  only empty directories created by this installation. The executable rollback
+  helper is retained in the supervisor workspace as work/deploy_capabilities.py.
