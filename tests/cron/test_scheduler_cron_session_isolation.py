@@ -19,17 +19,18 @@ from gateway.session_context import (
     set_session_vars,
 )
 from tools import approval as approval_module
+from hermes_state import SessionDB
 
 
-class _DummySessionDB:
-    def set_session_title(self, *args, **kwargs):
-        pass
-
-    def end_session(self, *args, **kwargs):
-        pass
-
-    def close(self):
-        pass
+@pytest.fixture
+def session_db(tmp_path):
+    # Exercise the native store contract, including live hidden-session seeding.
+    # A partial test double can fail before reaching the approval assertion.
+    db = SessionDB(tmp_path / "cron-session-state.db")
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 class _FakeCronAgent:
@@ -87,14 +88,14 @@ def _register_gateway_auto_approve(session_key: str) -> None:
 
 
 def test_run_job_cron_execute_code_deny_does_not_pollute_later_gateway_execute_code(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, session_db
 ):
     """Cron deny stays scoped; a later gateway approval still reaches its user."""
     monkeypatch.setenv("HERMES_MODEL", "test-model")
     monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
     monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "deny")
-    monkeypatch.setattr("hermes_state.get_shared_session_db", _DummySessionDB)
+    monkeypatch.setattr("hermes_state.get_shared_session_db", lambda: session_db)
     monkeypatch.setattr("run_agent.AIAgent", _FakeCronAgent)
     monkeypatch.setattr(
         "hermes_constants.resolve_reasoning_config", lambda *_args, **_kwargs: None

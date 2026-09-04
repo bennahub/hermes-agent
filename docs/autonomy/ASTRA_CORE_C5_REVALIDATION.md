@@ -116,3 +116,47 @@ Previously existing history remains outside the policy. No global
 After activation, verify config, boundary, service health, profile roster,
 canonical chat IDs, existing work IDs and no unexpected notices. The live
 runtime identity is a per-file manifest, not the VPS git HEAD alone.
+
+## Deployed revalidation — 2026-09-04 UTC
+
+The supervisor selectively deployed the seven reviewed core runtime files and
+15 retention configurations. Backup:
+`/home/hermes/.hermes/backups/astra-core-c5-20260904T232408Z`.
+The live scheduler's hidden-session seed and all protected overlays remained
+present. Runtime checks subsequently matched all seven core hashes and the
+17 separately owned C0 hashes.
+
+Actual-deployed Linux validation used the canonical runner with an isolated
+test tree whose product imports resolve to the live files. The systemd test
+namespace mounted the entire production Hermes home read-only and used private
+network/temp namespaces. The initial combined run reported **481 passed,
+3 failed, no skips**. Two failures belong to the separate C0 Chromium lane.
+The third exposed an inherited test-only mismatch: the preserved live scheduler
+already calls `SessionDB.create_session(hidden=True)`, while the old approval
+isolation test's partial database double omitted that native method. The same
+failure reproduced against the exact pre-core live scheduler. Replacing the
+double with a real temporary SessionDB preserved every approval assertion and
+passed against both the pre-core scheduler and deployed scheduler. The deployed
+rerun also passed all three runtime identity/isolation prerequisites.
+
+Existing managed SOUL blocks also retained the old blanket merge/deploy gate.
+A concurrent outside-managed persona edit at 23:22:59 UTC changed their full
+hashes before this deployment. The first hash-fenced refresh correctly refused
+to write. With supervisor authorization, a new manifest preserved those current
+outside bytes and unchanged mission/state files. The native renderer then
+changed only the single managed gate line across 13 enabled profiles. Backup:
+`/home/hermes/.hermes/backups/astra-managed-missions-20260904T233614Z`.
+A subsequent dry run reported 13 already-current profiles and zero changes.
+Hamad and deleted Nasser were excluded from this refresh.
+
+Read-only postchecks found unchanged canonical chat IDs, no decreasing message
+counts, unchanged observation-job identities/enabled states, unchanged surviving
+pilot work states, and Nasser still deleted. All 15 intended configs have
+`cron.session_retention_days: 30`. No live retention boundary exists yet: the
+first future agent-producing cron execution records it without deleting any
+history. That first activation and 30-day age eligibility were tested with real
+temporary databases; no production job was forced solely to create evidence.
+
+The test lane issued no production restart. Its first test unit started at
+23:30:38 UTC, after independently observed systemd restarts of gateway/serve at
+23:28:25/23:28:32. The external restart actor has not been established.
