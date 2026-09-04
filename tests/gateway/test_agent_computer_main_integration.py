@@ -84,6 +84,7 @@ def test_web_server_keeps_existing_routers_and_mounts_agent_computer():
     paths = {getattr(route, "path", "") for route in app.routes}
     assert "/api/agent-computers" in paths
     assert "/api/agent-computers/ensure" in paths
+    assert "/computer" in paths
     assert "/api/tools/toolsets" in paths
     assert any(path.startswith("/api/gateway") for path in paths)
     runtime = CONFIG_SCHEMA["agent_computer.runtime"]

@@ -27,6 +27,80 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def chromium_needs_sandbox_bypass() -> bool:
+    """Same conditions as ``tools.browser_tool._needs_chromium_sandbox_bypass``.
+
+    Hosted Linux with AppArmor userns restrictions cannot start Chromium
+    without ``--no-sandbox``. Reuse that existing Hermes rule; do not invent
+    a second sandbox policy.
+    """
+    import os
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return True
+    if Path("/.dockerenv").exists():
+        return True
+    userns_restrict = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+    try:
+        if Path(userns_restrict).read_text(encoding="utf-8").strip() == "1":
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def read_devtools_port(user_data: str) -> int | None:
+    """Read Chromium's loopback DevTools port from a user-data-dir."""
+    try:
+        line = Path(user_data).joinpath("DevToolsActivePort").read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    return int(line) if line.isdigit() else None
+
+
+def chromium_launch_argv(
+    binary: str,
+    user_data: str,
+    *,
+    sandbox_bypass: bool | None = None,
+    extra_args: list[str] | None = None,
+) -> list[str]:
+    """Loopback-only Chromium argv for a BrowserIdentity user-data-dir."""
+    import os
+
+    argv = [
+        binary,
+        f"--user-data-dir={user_data}",
+        "--remote-debugging-port=0",
+        "--remote-debugging-address=127.0.0.1",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-sync",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--force-device-scale-factor=1",
+        "--window-size=800,600",
+        "--headless=new",
+    ]
+    extras = [item.strip() for item in (extra_args or []) if item and item.strip()]
+    env_args = (
+        os.environ.get("AGENT_BROWSER_ARGS")
+        or os.environ.get("AGENT_BROWSER_CHROME_FLAGS")
+        or ""
+    )
+    extras.extend(item.strip() for item in env_args.split(",") if item.strip())
+    if sandbox_bypass is None:
+        sandbox_bypass = chromium_needs_sandbox_bypass()
+    if sandbox_bypass:
+        if "--no-sandbox" not in extras:
+            extras.append("--no-sandbox")
+        if "--disable-dev-shm-usage" not in extras:
+            extras.append("--disable-dev-shm-usage")
+    argv.extend(extras)
+    argv.append("about:blank")
+    return argv
+
+
 @dataclass
 class RuntimeHandle:
     computer_id: str
@@ -38,6 +112,7 @@ class RuntimeHandle:
     headed_same_host: bool = False
     last_pointer_x: float = 0.0
     last_pointer_y: float = 0.0
+    workspace_root: str = ""
     screenshot_width: int = 0
     screenshot_height: int = 0
     viewport_width: int = 0
@@ -115,6 +190,7 @@ class InMemoryRuntime:
             user_data_dir=identity.profile_ref if identity else computer.persistence_ref,
             cdp_loopback=None,
             backend="in_memory",
+            workspace_root=str(Path(computer.persistence_ref) / "workspace"),
         )
 
     def observe(self, handle: RuntimeHandle) -> Observation:
@@ -179,6 +255,8 @@ class InMemoryRuntime:
                 page.text = (page.text + " scrolled").strip()
             elif kind == "key":
                 page.text = (page.text + f" key:{key or code}").strip()
+            elif kind == "upload":
+                page.text = (page.text + f" uploaded:{text}").strip()
             elif kind == "set_cookie":
                 # Test-only durable auth stand-in. Never returned to clients.
                 page.cookies[target] = text
@@ -224,14 +302,18 @@ class HermesChromiumRuntime:
     def wake(self, computer: AgentComputer, identity: BrowserIdentity | None) -> RuntimeHandle:
         from hermes_cli.browser_connect import chromium_executable, detect_default_chromium
 
-        browser = detect_default_chromium() or "chromium"
-        binary = chromium_executable(browser)
+        import os
+
+        override = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
+        binary = override if override and Path(override).is_file() else ""
+        if not binary:
+            browser = detect_default_chromium() or "chromium"
+            binary = chromium_executable(browser) or ""
         if not binary:
             raise RuntimeError("no Chromium-family binary on this host")
         user_data = identity.profile_ref if identity else computer.persistence_ref
         Path(user_data).mkdir(parents=True, exist_ok=True)
         # Import locally so unit tests never spawn Chrome.
-        import os
         import subprocess
         import time
 
@@ -241,28 +323,27 @@ class HermesChromiumRuntime:
         except OSError:
             pass
         user_data = str(Path(user_data).resolve())
-        argv = [
+        downloads = Path(computer.persistence_ref) / "workspace" / "downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        argv = chromium_launch_argv(
             binary,
-            f"--user-data-dir={user_data}",
-            "--remote-debugging-port=0",
-            "--remote-debugging-address=127.0.0.1",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-sync",
-            "--disable-background-networking",
-            "--disable-default-apps",
-            "--force-device-scale-factor=1",
-            "--window-size=800,600",
-            "--headless=new",
-            "about:blank",
-        ]
+            user_data,
+            extra_args=[f"--download-default-directory={downloads.resolve()}"],
+        )
+        stderr_path = Path(user_data) / "chromium.stderr"
+        try:
+            stderr_fh = stderr_path.open("w", encoding="utf-8")
+        except OSError:
+            stderr_fh = subprocess.DEVNULL
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_fh,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+        if stderr_fh is not subprocess.DEVNULL:
+            stderr_fh.close()
         deadline = time.monotonic() + 30
         port = None
         while time.monotonic() < deadline:
@@ -275,11 +356,20 @@ class HermesChromiumRuntime:
             except OSError:
                 pass
             if proc.poll() is not None:
-                raise RuntimeError("chromium exited during startup")
+                hint = ""
+                try:
+                    hint = Path(user_data).joinpath("chromium.stderr").read_text(encoding="utf-8")[-400:]
+                except OSError:
+                    hint = ""
+                raise RuntimeError(f"chromium exited during startup {hint}".strip())
             time.sleep(0.2)
         if port is None:
             proc.terminate()
             raise RuntimeError("chromium did not expose a loopback debug port")
+        try:
+            Path(user_data).joinpath("chromium.pid").write_text(str(proc.pid), encoding="utf-8")
+        except OSError:
+            pass
         self._procs[computer.id] = proc
         handle = RuntimeHandle(
             computer_id=computer.id,
@@ -289,6 +379,7 @@ class HermesChromiumRuntime:
             process_id=proc.pid,
             backend="hermes_chromium",
             headed_same_host=False,
+            workspace_root=str(Path(computer.persistence_ref) / "workspace"),
         )
         try:
             loopback_cdp(
@@ -303,6 +394,62 @@ class HermesChromiumRuntime:
             )
         except Exception:
             pass
+        downloads = Path(handle.workspace_root) / "downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        try:
+            loopback_cdp(handle, "Page.enable", {})
+        except Exception:
+            pass
+        try:
+            loopback_cdp(
+                handle,
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(downloads.resolve()),
+                    "eventsEnabled": True,
+                },
+            )
+        except Exception:
+            pass
+        try:
+            loopback_cdp(
+                handle,
+                "Page.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(downloads.resolve()),
+                },
+            )
+        except Exception:
+            pass
+        return handle
+
+    def attach(self, computer: AgentComputer, identity: BrowserIdentity | None) -> RuntimeHandle | None:
+        """Reconnect to an already-running loopback Chromium for this identity."""
+        user_data = identity.profile_ref if identity else computer.persistence_ref
+        port = read_devtools_port(user_data)
+        if port is None:
+            return None
+        pid = None
+        try:
+            raw = Path(user_data).joinpath("chromium.pid").read_text(encoding="utf-8").strip()
+            if raw.isdigit():
+                pid = int(raw)
+        except OSError:
+            pid = None
+        handle = RuntimeHandle(
+            computer_id=computer.id,
+            identity_id=identity.id if identity else None,
+            user_data_dir=str(Path(user_data).resolve()),
+            cdp_loopback=f"http://127.0.0.1:{port}",
+            process_id=pid,
+            backend="hermes_chromium",
+            headed_same_host=False,
+            workspace_root=str(Path(computer.persistence_ref) / "workspace"),
+        )
+        if not self.alive(handle):
+            return None
         return handle
 
     def observe(self, handle: RuntimeHandle) -> Observation:
@@ -376,28 +523,88 @@ class HermesChromiumRuntime:
                 if target in obs.url or (obs.url and obs.url != "about:blank"):
                     return obs
                 time.sleep(0.2)
-        elif kind == "type":
+        elif kind in ("type", "text"):
             if target:
                 loopback_cdp(
                     handle,
                     "Runtime.evaluate",
                     {
-                        "expression": f"document.querySelector({target!r})?.focus()",
+                        "expression": (
+                            f"(() => {{ const el = document.querySelector({target!r}); "
+                            "if (!el) return false; el.focus(); return true; }})()"
+                        ),
+                        "userGesture": True,
+                    },
+                )
+            else:
+                loopback_cdp(
+                    handle,
+                    "Runtime.evaluate",
+                    {
+                        "expression": (
+                            "(() => { const cur = document.activeElement; "
+                            "if (cur && cur !== document.body && cur !== document.documentElement "
+                            "&& ('value' in cur || cur.isContentEditable)) { cur.focus(); return 'keep'; } "
+                            "const el = document.querySelector('input:not([type=hidden]):not([type=file]):not([type=button]):not([type=submit]),textarea,[contenteditable=true]'); "
+                            "if (!el) return false; el.focus(); return 'first'; })()"
+                        ),
                         "userGesture": True,
                     },
                 )
             loopback_cdp(handle, "Input.insertText", {"text": text})
-        elif kind == "click":
-            expr = (
-                f"document.querySelector({target!r})?.click()"
-                if target
-                else "undefined"
-            )
             loopback_cdp(
                 handle,
                 "Runtime.evaluate",
-                {"expression": expr, "userGesture": True},
+                {
+                    "expression": (
+                        "(() => { const el = "
+                        + (f"document.querySelector({target!r}) || " if target else "")
+                        + "document.activeElement; if (!el || el === document.body) return false; "
+                        "if ('value' in el && !(el.value || '').includes("
+                        + repr(text)
+                        + ")) el.value = (el.value || '') + "
+                        + repr(text)
+                        + "; el.dispatchEvent(new Event('input', {bubbles:true})); "
+                        "el.dispatchEvent(new Event('change', {bubbles:true})); "
+                        "return true; })()"
+                    ),
+                    "userGesture": True,
+                },
             )
+        elif kind == "click":
+            clicked = False
+            if target:
+                box = loopback_cdp(
+                    handle,
+                    "Runtime.evaluate",
+                    {
+                        "expression": (
+                            f"(() => {{ const el = document.querySelector({target!r}); "
+                            "if (!el) return null; el.scrollIntoView({{block:'center'}}); "
+                            "el.focus(); const r = el.getBoundingClientRect(); "
+                            "return {{x: r.x + r.width/2, y: r.y + r.height/2}}; }})()"
+                        ),
+                        "returnByValue": True,
+                        "userGesture": True,
+                    },
+                ) or {}
+                point = ((box.get("result") or {}).get("value")) or {}
+                if isinstance(point, dict) and point.get("x") is not None:
+                    vx, vy = float(point["x"]), float(point["y"])
+                    self._mouse(handle, "mousePressed", vx, vy, click_count=1)
+                    self._mouse(handle, "mouseReleased", vx, vy, click_count=1)
+                    clicked = True
+            if not clicked:
+                expr = (
+                    f"document.querySelector({target!r})?.click()"
+                    if target
+                    else "undefined"
+                )
+                loopback_cdp(
+                    handle,
+                    "Runtime.evaluate",
+                    {"expression": expr, "userGesture": True},
+                )
         elif kind == "pointer_move":
             vx, vy = self._viewport_point(handle, x, y)
             self._mouse(handle, "mouseMoved", vx, vy)
@@ -433,11 +640,78 @@ class HermesChromiumRuntime:
                 "Input.dispatchKeyEvent",
                 {"type": "keyUp", "key": name, "code": code or name},
             )
-        elif kind == "text":
-            loopback_cdp(handle, "Input.insertText", {"text": text})
+        elif kind == "upload":
+            if not target or not text:
+                raise ValueError("upload requires target selector and workspace filename")
+            root = Path(handle.workspace_root or ".").resolve()
+            name = Path(text).name
+            if not name or name != text:
+                raise ValueError("upload filename must be a workspace basename")
+            chosen = None
+            for folder in ("uploads", "downloads"):
+                candidate = (root / folder / name).resolve()
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    continue
+                if candidate.is_file():
+                    chosen = candidate
+                    break
+            if chosen is None:
+                raise ValueError("authorized workspace file not found")
+            cdp_set_file_input(handle, target, chosen)
         else:
             raise ValueError(f"unsupported computer action: {kind}")
-        return self.observe(handle)
+        if kind == "click" and target:
+            href = loopback_cdp(
+                handle,
+                "Runtime.evaluate",
+                {
+                    "expression": f"document.querySelector({target!r})?.href || location.href",
+                    "returnByValue": True,
+                },
+            ) or {}
+            self._maybe_save_loopback_download(
+                handle, str(((href.get("result") or {}).get("value") or ""))
+            )
+        obs = self.observe(handle)
+        self._maybe_save_loopback_download(handle, obs.url)
+        return obs
+
+    def _maybe_save_loopback_download(self, handle: RuntimeHandle, url: str) -> None:
+        """If headless navigated to a loopback file, store it in the workspace."""
+        if not url or not url.startswith("http://127.0.0.1:"):
+            return
+        from urllib.parse import urlparse
+        import urllib.request
+
+        parsed = urlparse(url)
+        name = Path(parsed.path).name
+        suffix = Path(name).suffix.lower()
+        if not name or suffix in {"", ".html", ".htm"}:
+            return
+        root = Path(handle.workspace_root or ".").resolve()
+        dest = (root / "downloads" / name).resolve()
+        try:
+            dest.relative_to(root / "downloads")
+        except ValueError:
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                ctype = str(resp.headers.get("Content-Type") or "")
+                if "text/html" in ctype:
+                    return
+                disp = str(resp.headers.get("Content-Disposition") or "")
+                if "filename=" in disp:
+                    offered = disp.split("filename=", 1)[1].strip().strip('"')
+                    offered = Path(offered).name
+                    if offered:
+                        dest = (root / "downloads" / offered).resolve()
+                        dest.relative_to(root / "downloads")
+                dest.write_bytes(resp.read())
+        except Exception:
+            return
 
     def _viewport_point(self, handle: RuntimeHandle, x: Any, y: Any) -> tuple[float, float]:
         sx = float(x or 0)
@@ -470,18 +744,9 @@ class HermesChromiumRuntime:
         loopback_cdp(handle, "Input.dispatchMouseEvent", params)
 
     def alive(self, handle: RuntimeHandle) -> bool:
-        import os
         import urllib.request
 
-        proc = self._procs.get(handle.computer_id)
-        if proc is None or proc.poll() is not None:
-            return False
-        if handle.process_id:
-            try:
-                os.kill(handle.process_id, 0)
-            except OSError:
-                return False
-        if not handle.cdp_loopback:
+        if not handle.cdp_loopback or not handle.cdp_loopback.startswith("http://127.0.0.1:"):
             return False
         try:
             with urllib.request.urlopen(handle.cdp_loopback.rstrip("/") + "/json/version", timeout=1):
@@ -567,22 +832,12 @@ class HermesChromiumRuntime:
             time.sleep(0.05)
 
 
-def loopback_cdp(handle: RuntimeHandle, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Send one CDP method to the loopback DevTools endpoint.
-
-    Reuses ``tools.browser_cdp_tool._cdp_call``. The HTTP origin must stay
-    127.0.0.1 — this is not a public CDP surface.
-    """
+def _loopback_ws(handle: RuntimeHandle) -> tuple[str, str | None]:
     if not handle.cdp_loopback or not handle.cdp_loopback.startswith("http://127.0.0.1:"):
         raise RuntimeError("refusing CDP on a non-loopback handle")
-    import asyncio
     import json
-    import urllib.request
-    from concurrent.futures import ThreadPoolExecutor
-
-    from tools.browser_cdp_tool import _cdp_call
-
     import time
+    import urllib.request
 
     base = handle.cdp_loopback.rstrip("/")
     version = None
@@ -610,21 +865,140 @@ def loopback_cdp(handle: RuntimeHandle, method: str, params: dict[str, Any] | No
                 target_id = page.get("id")
     except Exception:
         target_id = None
+    return str(ws_url), target_id
 
-    async def _run() -> dict[str, Any]:
-        return await _cdp_call(ws_url, method, params or {}, target_id, 8.0)
+
+def _run_loopback_async(coro_factory):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(_run())
+        return asyncio.run(coro_factory())
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(lambda: asyncio.run(_run())).result(timeout=12)
+        return pool.submit(lambda: asyncio.run(coro_factory())).result(timeout=20)
+
+
+def cdp_set_file_input(handle: RuntimeHandle, selector: str, path: Path) -> None:
+    """Set a file input using one loopback CDP websocket session.
+
+    ``Runtime.evaluate`` objectIds are session-scoped. One-shot
+    ``loopback_cdp`` calls cannot feed ``DOM.setFileInputFiles``.
+    """
+    import asyncio
+    import json
+
+    from tools.browser_cdp_tool import websockets
+
+    ws_url, target_id = _loopback_ws(handle)
+    resolved = str(path.resolve())
+
+    async def _run() -> None:
+        if websockets is None:
+            raise RuntimeError("websockets is required for Chromium CDP")
+        async with websockets.connect(
+            ws_url,
+            max_size=None,
+            open_timeout=8,
+            close_timeout=5,
+            ping_interval=None,
+        ) as ws:
+            next_id = 1
+            session_id = None
+            if target_id:
+                attach_id = next_id
+                next_id += 1
+                await ws.send(
+                    json.dumps(
+                        {
+                            "id": attach_id,
+                            "method": "Target.attachToTarget",
+                            "params": {"targetId": target_id, "flatten": True},
+                        }
+                    )
+                )
+                while True:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
+                    if msg.get("id") == attach_id:
+                        if "error" in msg:
+                            raise RuntimeError(f"Target.attachToTarget failed: {msg['error']}")
+                        session_id = (msg.get("result") or {}).get("sessionId")
+                        break
+
+            async def send(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                nonlocal next_id
+                call_id = next_id
+                next_id += 1
+                req: dict[str, Any] = {"id": call_id, "method": method, "params": params or {}}
+                if session_id:
+                    req["sessionId"] = session_id
+                await ws.send(json.dumps(req))
+                while True:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
+                    if msg.get("id") == call_id:
+                        if "error" in msg:
+                            raise RuntimeError(f"CDP error: {msg['error']}")
+                        return msg.get("result") or {}
+
+            await send("DOM.enable", {})
+            remote = await send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"document.querySelector({selector!r})",
+                    "objectGroup": "upload",
+                },
+            )
+            object_id = ((remote.get("result") or {}).get("objectId"))
+            if not object_id:
+                raise ValueError("upload target not found")
+            node = await send("DOM.requestNode", {"objectId": object_id})
+            node_id = node.get("nodeId")
+            payload: dict[str, Any] = {"files": [resolved]}
+            if node_id:
+                payload["nodeId"] = node_id
+            else:
+                payload["objectId"] = object_id
+            await send("DOM.setFileInputFiles", payload)
+
+    _run_loopback_async(_run)
+
+
+def loopback_cdp(handle: RuntimeHandle, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Send one CDP method to the loopback DevTools endpoint.
+
+    Reuses ``tools.browser_cdp_tool._cdp_call``. The HTTP origin must stay
+    127.0.0.1 — this is not a public CDP surface.
+    """
+    from tools.browser_cdp_tool import _cdp_call
+
+    ws_url, target_id = _loopback_ws(handle)
+
+    async def _run() -> dict[str, Any]:
+        return await _cdp_call(ws_url, method, params or {}, target_id, 8.0)
+
+    return _run_loopback_async(_run)
+
+
+def private_dir(path: Path) -> Path:
+    """Create a Hermes-owned directory that is not world-readable."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    for parent in path.parents:
+        if parent.name == "agent-computers":
+            try:
+                parent.chmod(0o700)
+            except OSError:
+                pass
+            break
+    return path
 
 
 def new_identity_profile_dir(root: Path, identity_id: str) -> str:
     """Durable managed dir. Never the OS default Chromium user-data-dir."""
-    path = root / "identities" / identity_id
-    path.mkdir(parents=True, exist_ok=True)
+    path = private_dir(root / "identities" / identity_id)
     (path / ".hermes-identity").write_text(identity_id, encoding="utf-8")
     return str(path)

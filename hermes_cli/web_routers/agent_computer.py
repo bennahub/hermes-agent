@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from gateway.agent_computer import get_contract
 from gateway.agent_computer.contract import error_payload, owner_principal
 from gateway.agent_computer.errors import AgentComputerError
 from hermes_cli.web_deps import late
+from hermes_cli.web_routers.agent_computer_ui import COMPUTER_UI_HTML
 
 router = APIRouter()
 _require_token = late("_require_token")
@@ -35,8 +37,8 @@ class AttachBody(BaseModel):
 
 
 class LeaseBody(BaseModel):
-    lease_id: str
-    fencing_epoch: int
+    lease_id: str = ""
+    fencing_epoch: int = 0
     kind: str = ""
     target: str = ""
     text: str = ""
@@ -64,6 +66,13 @@ def _owner(request: Request) -> str:
 
 def _http(exc: AgentComputerError) -> HTTPException:
     return HTTPException(status_code=exc.http_status, detail=error_payload(exc))
+
+
+@router.get("/computer")
+def computer_ui(request: Request):
+    """Authenticated owner takeover surface. Human language only."""
+    _require_token(request)
+    return HTMLResponse(COMPUTER_UI_HTML)
 
 
 @router.get("/api/agent-computers")
@@ -205,6 +214,39 @@ def create_identity(request: Request, body: IdentityCreateBody):
 def revoke_identity(request: Request, identity_id: str):
     try:
         return get_contract().revoke_identity(identity_id, _owner(request))
+    except AgentComputerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/api/agent-computers/{computer_id}/artifacts")
+def list_artifacts(request: Request, computer_id: str):
+    try:
+        return get_contract().list_artifacts(computer_id, _owner(request))
+    except AgentComputerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/api/agent-computers/{computer_id}/artifacts/{name}")
+def get_artifact(request: Request, computer_id: str, name: str, folder: str = "downloads"):
+    try:
+        path = get_contract().artifact_path(
+            computer_id, _owner(request), name, folder=folder
+        )
+        return FileResponse(path, filename=path.name)
+    except AgentComputerError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/api/agent-computers/{computer_id}/workspace-files")
+async def put_workspace_file(request: Request, computer_id: str, file: UploadFile = File(...)):
+    try:
+        data = await file.read()
+        return get_contract().put_upload(
+            computer_id,
+            _owner(request),
+            name=file.filename or "upload.bin",
+            data=data,
+        )
     except AgentComputerError as exc:
         raise _http(exc) from exc
 

@@ -272,6 +272,30 @@ class AgentComputerContract:
             payload["agent_lease_id"] = lease.lease_id
         return sanitize_public(payload)
 
+    def list_artifacts(self, computer_id: str, principal: str) -> dict[str, Any]:
+        computer = self.service.get_computer(computer_id)
+        self.service.authorize_read(computer, principal)
+        return sanitize_public({"artifacts": self.service.list_workspace_artifacts(computer)})
+
+    def put_upload(
+        self, computer_id: str, principal: str, *, name: str, data: bytes
+    ) -> dict[str, Any]:
+        computer = self.service.get_computer(computer_id)
+        self.service.authorize_read(computer, principal)
+        return sanitize_public(
+            {"file": self.service.write_workspace_upload(computer, name, data)}
+        )
+
+    def artifact_path(self, computer_id: str, principal: str, name: str, *, folder: str = "downloads"):
+        computer = self.service.get_computer(computer_id)
+        self.service.authorize_read(computer, principal)
+        path = self.service.resolve_workspace_file(computer, name, folder=folder)
+        if not path.is_file():
+            from .errors import NotFoundError
+
+            raise NotFoundError("artifact not found")
+        return path
+
     def approve_checkpoint(self, checkpoint_id: str, principal: str) -> dict[str, Any]:
         cp = self.service.approve_checkpoint(checkpoint_id, principal)
         return sanitize_public(
