@@ -336,6 +336,11 @@ def delegate(
     to_agent = (target or "").strip().lstrip("@").lower()
     if not to_agent:
         return {"ok": False, "error": "missing_target"}
+    from hermes_cli.profiles import validate_profile_name
+    try:
+        validate_profile_name(to_agent)
+    except ValueError:
+        return {"ok": False, "error": "invalid_target"}
     if to_agent == slug:
         return {"ok": False, "error": "self_delegate"}
     if slug == "hamad" or to_agent == "hamad":

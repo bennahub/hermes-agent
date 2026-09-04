@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 from agent.autonomy import kernel, store
 
+import pytest
+
 
 def test_idle_observation_gets_another_discovery_turn(tmp_path, monkeypatch):
     now = datetime(2026, 9, 5, 8, tzinfo=timezone.utc)
@@ -47,3 +49,14 @@ def test_resume_prompt_includes_durable_completion_and_waiting_context(tmp_path)
     assert "p95 below 2 seconds" in prompt
     assert "awaiting measured replica lag from Sami" in prompt
     assert "BWM-805" in prompt
+
+
+@pytest.mark.parametrize("target", ["../hamad", "../../escape"])
+def test_delegate_rejects_path_targets_before_mirroring_state(tmp_path, target):
+    home = tmp_path / "profiles/badr"
+    home.mkdir(parents=True)
+    result = kernel.delegate(target=target, goal="bounded task", hermes_home=home, send=False)
+    assert result["ok"] is False
+    assert result["error"] == "invalid_target"
+    assert not (tmp_path / "hamad/autonomy").exists()
+    assert not (tmp_path / "escape/autonomy").exists()

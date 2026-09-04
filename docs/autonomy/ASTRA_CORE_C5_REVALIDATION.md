@@ -40,6 +40,7 @@ applied as narrow reviewed patches to the live files, never replacements.
 |---|---|---|
 | Repeated observation initiative | Idle fingerprint remained `mission:<digest>` after a quiet run and three hours; native monitor suppressed all subsequent discovery | Idle discovery fingerprint changes after the 90-minute cooldown; active work retains its resume bucket; waiting/needs_owner stays quiet |
 | Fresh event vs replay | Two different Jira updates on the same issue were both keyed only by issue/action; GitHub explicit delivery IDs were ignored when run ID existed | Delivery identities take precedence; Jira fallback keys include payload revision; GitHub run attempt distinguishes reruns |
+| Delegation profile isolation | A path-shaped target such as `../hamad` passed string-only isolation checks and wrote a mirrored ledger outside the target profile registry | Reuse native profile-name validation before any collaboration write |
 | Bounded concurrent work | A competing work row inserted after admission checks allowed a second top-level initiative | SQLite `BEGIN IMMEDIATE` plus admission recheck inside insertion transaction |
 | Restartable waiting state | Observation prompt omitted persisted waiting reason, completion contract and Jira ref | Resume context includes those durable facts |
 | Scope authorization | Prompt demanded Owner for every merge/deploy even when already within authorized scope | Prompt honors existing scope authorization and identifies genuine external consequences |
@@ -90,6 +91,11 @@ message or Owner-visible pilot notice was sent during this inspection.
 - Final combined expanded run: **391 passed** (20 files), including native
   prune filters/pinned protection and cron session isolation. Independent
   review remains required against the frozen candidate.
+- Final core and native webhook follow-up: **119 passed** (13 files),
+  including two new path-target rejection regressions. The local test venv
+  needed the repository-declared `pytest-asyncio==1.3.0` dependency before
+  the native async tests could execute; initial unsupported-async failures
+  were an environment issue, not ignored product failures.
 
 ## Deployment and activation boundary
 
