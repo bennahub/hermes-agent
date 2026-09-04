@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,7 +27,14 @@ from gateway.agent_computer.pointer import mapping_kind
 from gateway.agent_computer.service import AgentComputerService
 from gateway.agent_computer.store import AgentComputerStore
 
-pytestmark = pytest.mark.macos_only
+# Keep the native Mac CI selector while also exercising the hosted Linux path.
+# Applying both OS markers would skip every test on every host.
+if sys.platform == "darwin":
+    pytestmark = pytest.mark.macos_only
+elif sys.platform.startswith("linux"):
+    pytestmark = pytest.mark.linux_only
+else:
+    pytestmark = pytest.mark.skip(reason="hosted Chromium proof requires native Linux or macOS")
 
 _PAGE = """<!doctype html>
 <html><head><title>BWM-796 Synthetic</title></head>
@@ -48,12 +56,26 @@ _PAGE = """<!doctype html>
 def _chrome_binary() -> str | None:
     from hermes_cli.browser_connect import chromium_executable, detect_default_chromium
 
+    override = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
+    if override and Path(override).is_file() and os.access(override, os.X_OK):
+        return override
+    if sys.platform.startswith("linux"):
+        # Reuse the existing browser cache roots. Prefer the installed native
+        # executable to a distro snap wrapper, which cannot launch in the
+        # read-only/private-network VPS test namespace. Never download a build.
+        from tools.browser_tool import _chromium_search_roots
+
+        for root in _chromium_search_roots():
+            for binary in sorted(Path(root).glob("chromium-*/chrome-linux*/chrome"), reverse=True):
+                if binary.is_file() and os.access(binary, os.X_OK):
+                    return str(binary)
     browser = detect_default_chromium() or "chrome"
-    return chromium_executable(browser) or chromium_executable("chrome")
+    return chromium_executable(browser) or chromium_executable("chrome") or chromium_executable("chromium")
 
 
+_CHROME_BINARY = _chrome_binary()
 requires_chrome = pytest.mark.skipif(
-    _chrome_binary() is None, reason="no Chromium-family binary on this host"
+    _CHROME_BINARY is None, reason="no Chromium-family binary on this host"
 )
 
 
@@ -121,7 +143,9 @@ def local_page():
 
 
 @pytest.fixture
-def chromium_pair(tmp_path):
+def chromium_pair(tmp_path, monkeypatch):
+    # The real runtime must launch the same binary that satisfied discovery.
+    monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", _CHROME_BINARY)
     runtime = HermesChromiumRuntime()
     svc = AgentComputerService(
         AgentComputerStore(tmp_path / "state.db"),

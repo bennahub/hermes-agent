@@ -125,6 +125,24 @@ rejection. Further tests cover stale ready reconciliation, service reattach,
 recovery admission, identity fencing, and a real unrelated subprocess surviving
 a stale-PID termination attempt.
 
+External review found that the inherited module-level `macos_only` marker would
+skip all six real Chromium tests on the deployed Linux host. A test-only repair
+now selects the actual native host marker: `macos_only` on macOS, `linux_only` on
+Linux, and an explicit skip elsewhere. The Mac CI selector is retained without
+spoofing `sys.platform`. On Linux the tests reuse Hermes's browser cache roots to
+find an installed native Chromium executable, then set the existing runtime
+binary override within the isolated test fixture. No browser is downloaded, no
+live identity is used, and product files remain byte-identical to `90f4285`.
+
+The VPS has an executable at
+`/home/hermes/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome`.
+After this test-only repair, the native Mac CI selection
+`scripts/run_tests.sh tests/gateway/test_agent_computer_chromium.py -m macos_only`
+passes all **six tests**, with zero failures, in 13.1 seconds.
+Native Linux execution is a separate required check against deployed product
+modules in the protected disposable test tree; the earlier Mac pass is not
+represented as a Linux pass.
+
 ## Deployment and remaining acceptance
 
 Use the exact nine-file delta manifest, verify every live preimage before writes,
