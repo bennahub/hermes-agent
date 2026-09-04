@@ -115,6 +115,8 @@ class RuntimeHandle:
     workspace_root: str = ""
     screenshot_width: int = 0
     screenshot_height: int = 0
+    screenshot_viewport_width: int = 0
+    screenshot_viewport_height: int = 0
     viewport_width: int = 0
     viewport_height: int = 0
     target_id: str | None = None
@@ -512,7 +514,9 @@ class HermesChromiumRuntime:
         except Exception:
             pass
         try:
-            self.ensure_workspace(handle, computer.workspace_url)
+            # A new Chromium process may reopen an older disk session. The
+            # control plane's last saved URL is authoritative for a cold wake.
+            self.ensure_workspace(handle, computer.workspace_url, force=True)
         except Exception:
             pass
         return handle
@@ -591,7 +595,7 @@ class HermesChromiumRuntime:
             return None
         return handle
 
-    def ensure_workspace(self, handle: RuntimeHandle, workspace_url: str) -> None:
+    def ensure_workspace(self, handle: RuntimeHandle, workspace_url: str, *, force: bool = False) -> None:
         target = safe_workspace_url(workspace_url)
         if not target:
             return
@@ -605,15 +609,22 @@ class HermesChromiumRuntime:
             current = str(((result.get("result") or {}).get("value")) or "about:blank")
         except Exception:
             current = "about:blank"
-        if not page_needs_restore(current):
+        if current == target or (not force and not page_needs_restore(current)):
             return
         import time
 
         loopback_cdp(handle, "Page.enable", {})
-        loopback_cdp(handle, "Page.navigate", {"url": target})
+        navigation = loopback_cdp(handle, "Page.navigate", {"url": target}) or {}
+        loader_id = navigation.get("loaderId")
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
             try:
+                if loader_id:
+                    tree = loopback_cdp(handle, "Page.getFrameTree", {}) or {}
+                    frame = (tree.get("frameTree") or {}).get("frame") or {}
+                    if frame.get("loaderId") != loader_id:
+                        time.sleep(0.05)
+                        continue
                 result = loopback_cdp(
                     handle,
                     "Runtime.evaluate",
@@ -674,6 +685,10 @@ class HermesChromiumRuntime:
         vp_h = int(value.get("viewportHeight") or 0)
         handle.screenshot_width = shot_w
         handle.screenshot_height = shot_h
+        # REST pointer coordinates refer to this observation, whose actual CSS
+        # viewport can differ from the persistent stream's configured viewport.
+        handle.screenshot_viewport_width = vp_w
+        handle.screenshot_viewport_height = vp_h
         # Keep the designed source viewport. innerHeight on a restored tab
         # is often 757 — writing that back made stream clicks remapped.
         if handle.viewport_width <= 0:
@@ -914,8 +929,8 @@ class HermesChromiumRuntime:
             sy,
             screenshot_width=handle.screenshot_width,
             screenshot_height=handle.screenshot_height,
-            viewport_width=handle.viewport_width,
-            viewport_height=handle.viewport_height,
+            viewport_width=handle.screenshot_viewport_width or handle.viewport_width,
+            viewport_height=handle.screenshot_viewport_height or handle.viewport_height,
         )
         handle.last_pointer_x = vx
         handle.last_pointer_y = vy

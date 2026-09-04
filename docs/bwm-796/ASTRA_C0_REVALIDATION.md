@@ -99,7 +99,7 @@ agent_computer:
 Executed using `scripts/run_tests.sh`; no direct pytest invocation.
 
 The inherited four suites passed **77/77**, despite history/origin/layout defects.
-The repaired candidate passes **88/88 across five files**, including six real
+The initial repaired candidate passed **88/88 across five files**, including six real
 Chromium tests and nine added control/resource regressions. Final local run:
 **13.9 seconds, two workers, zero failures, no flaky retry pass**.
 
@@ -143,6 +143,43 @@ Native Linux execution is a separate required check against deployed product
 modules in the protected disposable test tree; the earlier Mac pass is not
 represented as a Linux pass.
 
+### Native Linux findings and narrow follow-up
+
+The first protected run against the deployed `90f4285` source executed all six
+real Chromium cases and exposed two failures: an Owner REST pixel click missed
+its button, and one cold-wake history case reopened a stale page. The test unit
+mounted the production Hermes home read-only, used a private network and private
+temporary directories, and verified actual imported module hashes.
+
+A separate protected comparison using the preserved inherited `b3ee32c0f6`
+package reproduced the click defect. Linux reported a 1440×757 screenshot and
+CSS viewport, while the handle retained a configured 1440×900 stream viewport.
+The REST input path scaled y=184 below the intended button. The follow-up stores
+the observed CSS dimensions alongside each REST screenshot and uses that pair
+for REST pointer mapping. It leaves the configured stream viewport unchanged.
+
+The inherited package also consistently lost a native-link navigation during
+suspend. `90f4285` saved the current URL correctly, but its cold-wake history
+failure was timing/session-dependent: isolated repeats passed. The follow-up
+forces the saved URL only when launching a new Chromium process, whose disk
+session can contain an older page. It waits for the requested navigation's loader
+to become the active top-frame loader. Reattaching an existing live process keeps
+its current page. An actual second-service reattach test verifies that behavior;
+a deterministic delayed-loader regression verifies cold-restore completion.
+
+The protected Linux follow-up variant passes **91/91** in **14.3 seconds**: all
+**90 C0 cases across five files** (six real Chromium, eleven regressions) plus one
+supplemental native-navigation restore probe. This variant imports an explicitly
+copied candidate C0 package inside the disposable tree; it is not represented as
+an already deployed fix. Root must independently review and deploy the single
+changed product file, `gateway/agent_computer/adapter.py`, then rerun against the
+actual deployed module paths/hashes. No production runtime or identity was
+changed by these diagnostic/test runs.
+
+The exact same final five-file suite also passes **90/90 on native macOS**, with
+zero failures in **16.5 seconds**, through the canonical runner. Both hosts retain
+their real platform identity; no `sys.platform` substitution was used.
+
 ## Deployment and remaining acceptance
 
 Use the exact nine-file delta manifest, verify every live preimage before writes,
@@ -150,6 +187,11 @@ and preserve per-file rollback copies. Eight existing files plus new `locking.py
 are changed. No `tui_gateway`, `web_server`, `hosted_rooms`, unread, or BWM-797 files
 are replaced. Confirm both serve and gateway use the repaired control module;
 a serve-only restart is insufficient if gateway has imported its old copy.
+
+For a deployment already at `90f4285`, apply only the reviewed native-Linux
+follow-up adapter delta using `work/c0-evidence/native-repair-deployment-manifest.json`.
+The earlier nine-file manifest describes the initial transition from the
+inherited overlay, not a second whole-delta replay.
 
 After integration: check service health/restarts and re-run the focused suites,
 then execute the full authenticated public `/computer` fixture and Wikipedia

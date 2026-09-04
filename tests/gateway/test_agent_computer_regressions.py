@@ -166,3 +166,44 @@ def test_stale_persisted_pid_does_not_terminate_unrelated_process(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_rest_pointer_uses_its_observed_viewport_without_changing_stream_size():
+    from gateway.agent_computer.adapter import HermesChromiumRuntime
+    handle = RuntimeHandle('ac', None, '/synthetic',
+                           screenshot_width=1440, screenshot_height=757,
+                           screenshot_viewport_width=1440, screenshot_viewport_height=757,
+                           viewport_width=1440, viewport_height=900)
+    assert HermesChromiumRuntime()._viewport_point(handle, 500, 184) == (500, 184)
+    assert (handle.viewport_width, handle.viewport_height) == (1440, 900)
+
+
+def test_cold_restore_waits_for_requested_navigation_and_live_restore_preserves_page(monkeypatch):
+    from gateway.agent_computer import adapter
+    runtime = adapter.HermesChromiumRuntime()
+    handle = RuntimeHandle('ac', None, '/synthetic')
+    target = 'https://fixture.example/current'
+    state = {'url': 'https://fixture.example/old', 'frame_checks': 0, 'navigations': 0}
+
+    def cdp(_handle, method, params):
+        if method == 'Runtime.evaluate':
+            return {'result': {'value': state['url']}}
+        if method == 'Page.navigate':
+            state['navigations'] += 1
+            return {'loaderId': 'requested-loader'}
+        if method == 'Page.getFrameTree':
+            state['frame_checks'] += 1
+            committed = state['frame_checks'] >= 2
+            if committed:
+                state['url'] = target
+            return {'frameTree': {'frame': {'loaderId': 'requested-loader' if committed else 'old-loader'}}}
+        return {}
+
+    monkeypatch.setattr(adapter, 'loopback_cdp', cdp)
+    runtime.ensure_workspace(handle, target)
+    assert state['navigations'] == 0
+    assert state['url'].endswith('/old')
+    runtime.ensure_workspace(handle, target, force=True)
+    assert state['navigations'] == 1
+    assert state['url'] == target
+    assert state['frame_checks'] == 2

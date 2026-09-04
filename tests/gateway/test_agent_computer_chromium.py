@@ -640,6 +640,22 @@ def test_real_chromium_wake_idempotent(chromium_pair, local_page):
     assert len(starts) == 1
     attaches = [e for e in svc.list_audit(computer.id) if e.event_type == "browser_identity_attach"]
     assert len(attaches) == 1
+    # A new service attaching a live browser must preserve its current page,
+    # even when the persisted workspace URL predates an in-browser navigation.
+    contract = AgentComputerContract(svc)
+    contract.act(computer.id, agent, lease_id=lease.lease_id,
+                 fencing_epoch=lease.fencing_epoch, kind="navigate", target=local_page)
+    newer_page = _human_url(local_page)
+    runtime.stream_nav(handle, "open", newer_page)
+    fresh = AgentComputerService(AgentComputerStore(tmp_path / "state.db"),
+                                 HermesChromiumRuntime(), data_root=tmp_path)
+    try:
+        fresh.wake(computer.id, agent)
+        attached = fresh._handles[computer.id]
+        assert attached.process_id == pid
+        assert fresh.runtime.current_location(attached)["url"] == newer_page
+    finally:
+        fresh.store.close()
 
 
 def _pid_alive(pid: int | None) -> bool:
