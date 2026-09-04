@@ -11,7 +11,6 @@ probe), not specific config snapshots.
 """
 
 import os
-import sys
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
@@ -227,7 +226,7 @@ class TestMcpArgsOverlayFlag:
 
 
 class TestEmbeddedDaemonOverlayFlag:
-    def test_serve_process_disables_overlay_when_policy_requires_it(self):
+    def _spawn_command_with_overlay_disabled(self):
         daemon = cua_backend._EmbeddedCuaDaemon("/usr/bin/cua-driver", "unrestricted")
         process = MagicMock()
         process.poll.return_value = None
@@ -252,14 +251,26 @@ class TestEmbeddedDaemonOverlayFlag:
         ), patch.object(cua_backend.threading, "Thread"):
             daemon.start()
 
-        command = popen.call_args.args[0]
-        if sys.platform == "darwin":
-            assert command[:6] == [
-                "/usr/bin/open", "-n", "-g", "-a", "/Applications/CuaDriver.app", "--args",
-            ]
-            serve_command = command[6:]
-        else:
-            assert command[0] == "/usr/bin/cua-driver"
-            serve_command = command[1:]
+        return popen.call_args.args[0]
+
+    @pytest.mark.macos_only
+    def test_macos_serve_process_disables_overlay(self):
+        command = self._spawn_command_with_overlay_disabled()
+        assert command[:6] == [
+            "/usr/bin/open", "-n", "-g", "-a", "/Applications/CuaDriver.app", "--args",
+        ]
+        serve_command = command[6:]
         assert serve_command[0] == "serve"
         assert "--no-overlay" in serve_command
+
+    @pytest.mark.linux_only
+    def test_linux_serve_process_disables_overlay(self):
+        command = self._spawn_command_with_overlay_disabled()
+        assert command[:2] == ["/usr/bin/cua-driver", "serve"]
+        assert "--no-overlay" in command[1:]
+
+    @pytest.mark.windows_only
+    def test_windows_serve_process_disables_overlay(self):
+        command = self._spawn_command_with_overlay_disabled()
+        assert command[:2] == ["/usr/bin/cua-driver", "serve"]
+        assert "--no-overlay" in command[1:]

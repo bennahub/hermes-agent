@@ -20,6 +20,10 @@ The inherited overlay-spawn test incorrectly expected a direct binary on macOS.
 The same failure was reproduced on pristine source. The test now verifies the
 native macOS LaunchServices wrapper and preserves the no-overlay assertion;
 other hosts keep their direct-binary expectation. No sys.platform spoofing.
+Independent review caught that the generic host branch was excluded from native
+CI's marker selection. The spawn contract is now split into macos_only,
+linux_only and windows_only tests with shared setup, so each CI host selects its
+own assertion and preserves the no-overlay check.
 
 ## Direct native evidence
 
@@ -48,6 +52,9 @@ empty labels and stopped without guessing which button to press.
 Relevant native/CLI/tool exposure, session teardown, no-overlay, input target,
 approval isolation and token suites: 198 passed, 5 platform skips, 15 files.
 Focused legacy/schema tests were rerun after clarifying the legacy mock.
+After the independent-review marker repair, the three changed test files passed
+128 tests with 7 platform skips. The macos_only filtered run passed 2 tests,
+and the CI file selector includes this file for both macOS and Windows.
 Evidence is preserved in the supervisor workspace under work/c1-evidence.
 
 This document is execution evidence, not independent acceptance. The supervisor
