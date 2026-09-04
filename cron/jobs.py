@@ -4251,6 +4251,51 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
 # most recent N files per job; a non-positive value disables pruning (opt-out).
 _CRON_OUTPUT_DEFAULT_KEEP = 50
 
+CONTINUITY_OUTPUT_FILENAME = "continuity_last_output.json"
+CONTINUITY_MAX_CHARS = 8000
+
+
+def job_has_continuity(job: dict) -> bool:
+    sources = job.get("context_from") or []
+    if isinstance(sources, str):
+        sources = [sources]
+    return any(str(source).strip().lower() == "self" or source == job.get("id") for source in sources)
+
+
+def _read_job_continuity(job_id: str) -> dict:
+    path = _job_output_dir(job_id) / CONTINUITY_OUTPUT_FILENAME
+    try:
+        with path.open(encoding="utf-8") as stream:
+            data = json.loads(stream.read(CONTINUITY_MAX_CHARS * 6 + 512))
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def read_job_continuity(job_id: str) -> str:
+    return str(_read_job_continuity(job_id).get("response") or "")[:CONTINUITY_MAX_CHARS].strip()
+
+
+def job_continuity_matches(job_id: str, response: str) -> bool:
+    import hashlib
+    digest = hashlib.sha256(response.strip().encode("utf-8")).hexdigest()
+    return _read_job_continuity(job_id).get("sha256") == digest
+
+
+def save_job_continuity(job_id: str, response: str) -> None:
+    """Retain one bounded meaningful response independently of run history."""
+    import hashlib
+    from utils import atomic_json_write
+
+    ensure_dirs()
+    directory = _job_output_dir(job_id)
+    _ensure_cron_dir(directory)
+    _secure_dir(directory)
+    atomic_json_write(directory / CONTINUITY_OUTPUT_FILENAME, {
+        "response": response.strip()[:CONTINUITY_MAX_CHARS],
+        "sha256": hashlib.sha256(response.strip().encode("utf-8")).hexdigest(),
+    }, mode=0o600)
+
 
 def _cron_output_keep() -> int:
     """Resolve the per-job output-file retention cap from config (``cron.output_retention``)."""

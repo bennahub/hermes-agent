@@ -4658,9 +4658,26 @@ def _build_job_prompt(
                     key=lambda f: f.stat().st_mtime,
                     reverse=True,
                 )
-                if not output_files:
+                from cron.jobs import read_job_continuity
+                latest_output = read_job_continuity(source_job_id) if is_self else ""
+                if not latest_output and output_files:
+                    for output_file in output_files if is_self else output_files[:1]:
+                        previous = output_file.read_text(encoding="utf-8").strip()
+                        if is_self:
+                            # Upgrade existing jobs from their retained run history.
+                            # The response is useful state; the old injected prompt
+                            # must not recursively become the next run's memory.
+                            if "\n## Response\n" in previous:
+                                previous = previous.rsplit("\n## Response\n", 1)[1].strip()
+                            elif previous.startswith("# Cron Job:"):
+                                continue  # metadata-only skip/error execution
+                            if _is_cron_silence_response(previous) or previous == "(No response generated)":
+                                continue
+                        latest_output = previous
+                        if latest_output:
+                            break
+                if not latest_output:
                     continue  # silent skip — no output yet
-                latest_output = output_files[0].read_text(encoding="utf-8").strip()
                 # Truncate to 8K characters to avoid prompt bloat
                 _MAX_CONTEXT_CHARS = 8000
                 if len(latest_output) > _MAX_CONTEXT_CHARS:
@@ -4669,8 +4686,8 @@ def _build_job_prompt(
                     if is_self:
                         prompt = (
                             "## Your previous run's output\n"
-                            "The following is this job's most recent output from its "
-                            "previous run. Use it for continuity: avoid repeating what "
+                            "The following is this job's last meaningful output. "
+                            "Quiet or failed runs do not replace it. Use it for continuity: avoid repeating what "
                             "was already reported, and continue where the last run "
                             "left off.\n\n"
                             f"```\n{latest_output}\n```\n\n"
@@ -6443,6 +6460,8 @@ def run_job(
         except Exception as e:
             logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
 
+        _maybe_prune_cron_sessions(_session_db, _cfg)
+
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -7154,6 +7173,39 @@ def run_one_job(
                     _running_fire_owners.pop(job["id"], None)
 
 
+def _maybe_prune_cron_sessions(session_db, config: dict) -> None:
+    """Apply native cleanup to future cron history, preserving prior history."""
+    if session_db is None:
+        return
+    try:
+        import math
+        days = float((config.get("cron") or {}).get("session_retention_days", 0))
+        if not math.isfinite(days) or days <= 0:
+            return
+        now = time.time()
+        boundary_key = "cron_session_retention_started_at"
+        started = session_db.get_meta(boundary_key)
+        if started is None:
+            session_db.set_meta(boundary_key, str(now))
+            return  # activation never removes existing history
+        last = session_db.get_meta("cron_session_retention_last_prune")
+        if last is not None and now - float(last) < 86400:
+            return
+        from hermes_constants import get_hermes_home
+        # Native pruning excludes active/pinned rows and cleans transcript
+        # files. Explicit source + ended state excludes canonical/user chats.
+        session_db.prune_sessions(
+            older_than_days=days,
+            source="cron",
+            started_after=float(started),
+            exclude_titles=["Bot Chat"],
+            sessions_dir=get_hermes_home() / "sessions",
+        )
+        session_db.set_meta("cron_session_retention_last_prune", str(now))
+    except Exception:
+        logger.warning("Cron session retention failed", exc_info=True)
+
+
 def _run_one_job_body(
     job: dict,
     *,
@@ -7433,6 +7485,14 @@ def _run_one_job_body(
                 logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                 should_deliver = False
 
+            from cron.jobs import job_has_continuity, job_continuity_matches, save_job_continuity
+            continuity_response = (
+                job_has_continuity(job) and success and final_response.strip()
+                and not _is_cron_silence_response(final_response)
+            )
+            if continuity_response and job_continuity_matches(job["id"], final_response):
+                should_deliver = False
+
             if should_deliver and _fire_claim_ownership_lost():
                 should_deliver = False
                 logger.warning(
@@ -7461,6 +7521,11 @@ def _run_one_job_body(
                         raise
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)
+            if continuity_response and not delivery_error and not _is_interrupted(job["id"], execution_token):
+                with _side_effect_fence() as owns_continuity:
+                    if not owns_continuity:
+                        raise _FireClaimLostDuringSideEffect
+                    save_job_continuity(job["id"], final_response)
         except _FireClaimLostDuringSideEffect:
             side_effect_ownership_lost = True
         finally:

@@ -135,6 +135,9 @@ def _transaction(hermes_home: HomeLike = None) -> Iterator[sqlite3.Connection]:
         try:
             _initialize_schema(conn)
             with conn:
+                # Lock before read/decide/write, including separate CLI
+                # processes. A process-local RLock alone cannot fence them.
+                conn.execute("BEGIN IMMEDIATE")
                 yield conn
         finally:
             conn.close()
@@ -235,6 +238,7 @@ def start_work(
     state: Optional[str] = None,
     parent_id: Optional[str] = None,
     refs: Optional[Dict[str, Any]] = None,
+    enforce_admission: bool = False,
 ) -> Dict[str, Any]:
     existing = get_work_by_key(idempotency_key, hermes_home)
     if existing is not None:
@@ -265,6 +269,25 @@ def start_work(
     }
     try:
         with _transaction(hermes_home) as conn:
+            existing = conn.execute("SELECT * FROM work WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if existing is not None:
+                return {"created": False, "duplicate": True, "work": _row_to_work(existing)}
+            placeholders = ",".join("?" for _ in OPEN_STATES)
+            open_count = conn.execute(f"SELECT COUNT(*) FROM work WHERE state IN ({placeholders})", OPEN_STATES).fetchone()[0]
+            if open_count >= MAX_OPEN_WORK and (state or "working") in OPEN_STATES:
+                if enforce_admission:
+                    return {"created": False, "blocked": True, "reason": "open_work_cap"}
+                item["state"] = "dropped"
+            if enforce_admission:
+                if parent_id:
+                    parent = conn.execute("SELECT state FROM work WHERE id=?", (parent_id,)).fetchone()
+                    if parent is None or parent["state"] not in OPEN_STATES:
+                        return {"created": False, "blocked": True, "reason": "invalid_parent"}
+                else:
+                    placeholders = ",".join("?" for _ in ACTIVE_STATES)
+                    active = conn.execute(f"SELECT * FROM work WHERE state IN ({placeholders}) LIMIT 1", ACTIVE_STATES).fetchone()
+                    if active is not None:
+                        return {"created": False, "blocked": True, "reason": "already_working", "work": _row_to_work(active)}
             conn.execute(
                 """INSERT INTO work (
                      id, idempotency_key, state, why, outcome, done_contract,

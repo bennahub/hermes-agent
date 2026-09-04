@@ -38,10 +38,12 @@ INITIATIVE_CONTRACT = (
     "The durable ledger is the `hermes autonomy` CLI — do not use `todo` or "
     "files. Start at most one finite work unit. Unrelated findings get their "
     "own key. Verify, then `hermes autonomy work-complete`. Owner "
-    "`needs_owner` is only for secrets, Production write, merge/deploy, "
-    "money/legal, unavailable credentials, or a material architecture/"
+    "`needs_owner` is only for unavailable secrets/permissions, money/legal, "
+    "human authentication, a Production write outside authorized scope, or a material architecture/"
     "product decision the evidence cannot choose. The CLI projects that "
-    "request into the canonical Bot Chat; do not rely on cron output alone."
+    "request into the canonical Bot Chat; do not rely on cron output alone. "
+    "Existing scope-based authorization covers routine implementation, tests, "
+    "review, repair, merge and deployment within that authorized scope."
 )
 
 LEDGER_CLI = (
@@ -65,18 +67,28 @@ def event_key(payload: Any) -> str:
     if not isinstance(payload, dict):
         raw = json.dumps(payload, sort_keys=True, default=str)
         return "sha:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
-    action = str(payload.get("action") or payload.get("status") or "").strip()
+    headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
+    for key, value in headers.items():
+        if str(key).lower() in {"x-github-delivery", "delivery_id"} and value:
+            return str(value)
+    for key in ("delivery_id", "event_id"):
+        if payload.get(key) not in (None, ""):
+            return str(payload[key])
+    action = str(payload.get("action") or payload.get("status") or payload.get("webhookEvent") or "").strip()
     run = payload.get("workflow_run") if isinstance(payload.get("workflow_run"), dict) else None
     if run and run.get("id") not in (None, ""):
-        return f"gh:run:{run['id']}:{action or 'event'}"
+        attempt = f":attempt:{run['run_attempt']}" if run.get("run_attempt") else ""
+        return f"gh:run:{run['id']}:{action or 'event'}{attempt}"
     check = payload.get("check_suite") if isinstance(payload.get("check_suite"), dict) else None
     if check and check.get("id") not in (None, ""):
         return f"gh:check:{check['id']}:{action or 'event'}"
     issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else None
-    if issue and issue.get("key"):
-        return f"jira:{issue['key']}:{action or 'event'}"
-    if issue and issue.get("id") not in (None, ""):
-        return f"jira:{issue['id']}:{action or 'event'}"
+    if issue and (issue.get("key") or issue.get("id")):
+        # The issue identity is a work identity, not a delivery identity.
+        # Repeated updates of that issue must still be observed.
+        raw = json.dumps(payload, sort_keys=True, default=str)
+        revision = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+        return f"jira:{issue.get('key') or issue['id']}:{action or 'event'}:{revision}"
     headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
     for header in ("x-github-delivery", "X-GitHub-Delivery", "delivery_id"):
         if headers.get(header):
@@ -170,6 +182,7 @@ def begin_work(
         parent_id=parent_id,
         refs=refs,
         hermes_home=hermes_home,
+        enforce_admission=True,
     )
     if started.get("created"):
         store.increment_metric("work_started", hermes_home=hermes_home)
@@ -243,6 +256,11 @@ def format_observe_prompt(ctx: Dict[str, Any]) -> str:
             lines.append(
                 f"- {item['id']} [{item['state']}] {item.get('objective') or item.get('outcome')}"
             )
+            lines.append(f"  Done: {item.get('done_contract') or ''}")
+            if item.get("waiting_reason"):
+                lines.append(f"  Waiting: {item['waiting_reason']}")
+            if item.get("refs"):
+                lines.append(f"  Tracking: {json.dumps(item['refs'], ensure_ascii=False)}")
     if ctx.get("cooldown_active"):
         lines.extend(
             [
@@ -267,6 +285,10 @@ def monitor_fingerprint(hermes_home: HomeLike = None) -> str:
     if any(item["state"] in store.ACTIVE_STATES for item in items):
         bucket = int(_hermes_now().timestamp()) // RESUME_BUCKET_SECONDS
         parts.append(f"resume:{bucket}")
+    elif not items and not _cooldown_active(hermes_home):
+        # An idle ledger says nothing about external sources. Native cron
+        # still needs periodic discovery turns after a quiet observation.
+        parts.append(f"observe:{int(_hermes_now().timestamp()) // (COOLDOWN_MINUTES * 60)}")
     if _cooldown_active(hermes_home) and not items:
         parts.append("cooldown")
     mission = mission_catalog.read_mission(hermes_home)

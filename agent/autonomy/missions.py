@@ -338,8 +338,11 @@ def upsert_soul_mission(mission: str, hermes_home: HomeLike = None) -> bool:
     original = read_soul(hermes_home)
     inner = (
         "This section augments your role. It does not replace your personality.\n"
-        "Consequence gates still apply: secrets, Production write, merge/deploy, "
-        "money/legal, and material architecture or product decisions need the Owner.\n"
+        "Consequence gates still apply: unavailable secrets/permissions, human "
+        "authentication, money/legal, Production writes outside authorized scope, "
+        "and material decisions evidence cannot resolve need the Owner. Existing "
+        "scope-based authorization covers routine implementation, tests, review, "
+        "repair, merge and deployment within that scope.\n"
         "Self-initiated ordinary in-scope work does NOT wait for Owner «ابدأ». "
         "If the existing lifecycle requires a tracking identity, create or bind "
         "that Jira/work key yourself using the tools you already have, then "

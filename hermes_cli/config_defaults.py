@@ -2745,6 +2745,11 @@ DEFAULT_CONFIG = {
     },
 
     "cron": {
+        # Opt-in retention for future cron execution transcripts only. The
+        # first enabled run records a start boundary; older history and
+        # interactive/canonical sessions are outside this policy. Pinned
+        # and active sessions remain protected by native SessionDB pruning.
+        "session_retention_days": 0,
         # Allow cron-spawned agents to use the cronjob toolset (create/edit/
         # remove scheduled jobs from within a cron run — the "cron-librarian"
         # pattern). Off by default: the cronjob toolset is policy-denied in

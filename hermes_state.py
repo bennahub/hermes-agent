@@ -14820,6 +14820,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         min_tool_calls: Optional[int] = None,
         max_tool_calls: Optional[int] = None,
         include_pinned: bool = False,
+        exclude_titles: Optional[List[str]] = None,
     ) -> Tuple[str, list]:
         """Build the shared WHERE clause for bulk prune/archive selection.
 
@@ -14871,6 +14872,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         if title_like:
             clauses.append("LOWER(COALESCE(s.title, '')) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(title_like.lower())}%")
+        if exclude_titles:
+            placeholders = ",".join("?" for _ in exclude_titles)
+            clauses.append(f"COALESCE(s.title, '') NOT IN ({placeholders})")
+            params.extend(exclude_titles)
         if end_reason:
             clauses.append("s.end_reason = ?")
             params.append(end_reason)
