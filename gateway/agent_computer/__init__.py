@@ -62,8 +62,9 @@ def build_service(
     data_root: str | Path | None = None,
     runtime=None,
 ) -> AgentComputerService:
-    root = Path(data_root or default_data_root())
-    root.mkdir(parents=True, exist_ok=True)
+    from .adapter import private_dir
+
+    root = private_dir(Path(data_root or default_data_root()))
     if runtime is None:
         if resolve_runtime_name() == "chromium":
             runtime = HermesChromiumRuntime()

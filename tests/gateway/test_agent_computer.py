@@ -5,7 +5,6 @@ Synthetic profiles only. Never copies a real browser profile or cookies.
 
 from __future__ import annotations
 
-import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -441,11 +440,24 @@ def test_public_contract_strips_host_secrets(tmp_path):
 
 
 def test_chromium_adapter_is_loopback_and_skips_real_profile_snapshot():
-    source = inspect.getsource(HermesChromiumRuntime)
-    assert "--remote-debugging-address=127.0.0.1" in source
-    assert "--user-data-dir=" in source
-    assert "snapshot_real_profile" not in source
-    assert "--headless=new" in source
+    from gateway.agent_computer.adapter import chromium_launch_argv
+
+    argv = chromium_launch_argv("/usr/bin/chrome", "/tmp/ident", sandbox_bypass=False)
+    assert "--remote-debugging-address=127.0.0.1" in argv
+    assert "--remote-debugging-port=0" in argv
+    assert any(item.startswith("--user-data-dir=") for item in argv)
+    assert "--headless=new" in argv
+    assert "--no-sandbox" not in argv
+    assert not hasattr(HermesChromiumRuntime, "snapshot_real_profile")
+
+
+def test_chromium_launch_argv_adds_hosted_sandbox_bypass():
+    from gateway.agent_computer.adapter import chromium_launch_argv
+
+    argv = chromium_launch_argv("/usr/bin/chrome", "/tmp/ident", sandbox_bypass=True)
+    assert "--no-sandbox" in argv
+    assert "--disable-dev-shm-usage" in argv
+    assert "--remote-debugging-address=127.0.0.1" in argv
 
 
 def test_default_toolsets_do_not_include_computer_tools():
@@ -597,7 +609,7 @@ def test_chromium_observe_act_use_loopback_cdp(monkeypatch):
 
 
 def test_loopback_cdp_refuses_non_loopback():
-    from gateway.agent_computer.adapter import RuntimeHandle, loopback_cdp
+    from gateway.agent_computer.adapter import RuntimeHandle, cdp_set_file_input, loopback_cdp
 
     handle = RuntimeHandle(
         computer_id="ac_1",
@@ -607,6 +619,54 @@ def test_loopback_cdp_refuses_non_loopback():
     )
     with pytest.raises(RuntimeError, match="non-loopback"):
         loopback_cdp(handle, "Page.navigate", {"url": "https://example.test"})
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        cdp_set_file_input(handle, "#file-input", Path("/tmp/x.txt"))
+
+
+def test_chromium_upload_stays_in_workspace_and_uses_session_helper(monkeypatch, tmp_path):
+    from gateway.agent_computer.adapter import HermesChromiumRuntime, RuntimeHandle
+
+    uploads = []
+    workspace = tmp_path / "workspace"
+    (workspace / "uploads").mkdir(parents=True)
+    (workspace / "uploads" / "ok.txt").write_text("hello", encoding="utf-8")
+
+    def fake_set(handle, selector, path):
+        uploads.append((selector, Path(path).name, str(path)))
+
+    def fake_cdp(handle, method, params=None):
+        if method == "Runtime.evaluate":
+            return {
+                "result": {
+                    "value": {
+                        "url": "http://127.0.0.1:8765/",
+                        "title": "ok",
+                        "text": "received:ok.txt",
+                    }
+                }
+            }
+        if method == "Page.captureScreenshot":
+            return {"data": "AAAA"}
+        return {}
+
+    monkeypatch.setattr("gateway.agent_computer.adapter.cdp_set_file_input", fake_set)
+    monkeypatch.setattr("gateway.agent_computer.adapter.loopback_cdp", fake_cdp)
+    handle = RuntimeHandle(
+        computer_id="ac_1",
+        identity_id="bi_1",
+        user_data_dir="/tmp/x",
+        cdp_loopback="http://127.0.0.1:9",
+        workspace_root=str(workspace),
+        backend="hermes_chromium",
+    )
+    runtime = HermesChromiumRuntime()
+    obs = runtime.act(handle, kind="upload", target="#file-input", text="ok.txt")
+    assert uploads == [("#file-input", "ok.txt", str((workspace / "uploads" / "ok.txt").resolve()))]
+    assert "received:ok.txt" in obs.text
+    with pytest.raises(ValueError, match="basename"):
+        runtime.act(handle, kind="upload", target="#file-input", text="../ok.txt")
+    with pytest.raises(ValueError, match="authorized workspace file"):
+        runtime.act(handle, kind="upload", target="#file-input", text="missing.txt")
 
 
 def test_runtime_name_reads_config_yaml_env_is_override_only():
@@ -761,6 +821,9 @@ def test_pixel_and_text_actions_are_fenced_and_not_audited(tmp_path):
     kinds = [e.detail.get("kind") for e in svc.list_audit(computer.id) if e.event_type == "input_accepted"]
     assert "pointer_click" in kinds
     assert "text" in kinds
+    for item in (e.detail.get("lease_id") for e in svc.list_audit(computer.id)):
+        if isinstance(item, str) and item.startswith("ls_") and len(item) > 11:
+            assert item.endswith("…"), item
 
 
 def test_screenshot_viewport_mapping_identity_and_scale():
@@ -774,6 +837,50 @@ def test_screenshot_viewport_mapping_identity_and_scale():
     )
     assert (x, y) == (100.0, 50.0)
     assert jpeg_dimensions(b"not-a-jpeg") == (0, 0)
+
+
+def test_owner_can_observe_without_agent_lease(tmp_path):
+    svc = _svc(tmp_path)
+    computer = svc.ensure_computer("bwm796-synth")
+    agent = agent_principal("bwm796-synth")
+    computer, lease = svc.wake(computer.id, agent)
+    obs = svc.observe(computer.id, OWNER_PRINCIPAL, lease_id="", fencing_epoch=0)
+    assert obs.url
+    takeover = svc.request_takeover(computer.id, OWNER_PRINCIPAL, reason="view")
+    owner = svc.connect_takeover(computer.id, OWNER_PRINCIPAL, takeover_token=takeover["takeover_token"])
+    svc.give_back(
+        computer.id,
+        OWNER_PRINCIPAL,
+        lease_id=owner.lease_id,
+        fencing_epoch=owner.fencing_epoch,
+    )
+    _ = lease
+    assert svc.get_computer(computer.id).resume_observe_required is True
+    svc.observe(computer.id, OWNER_PRINCIPAL, lease_id="", fencing_epoch=0)
+    assert svc.get_computer(computer.id).resume_observe_required is True
+
+
+def test_read_devtools_port_from_user_data(tmp_path):
+    from gateway.agent_computer.adapter import read_devtools_port
+
+    assert read_devtools_port(str(tmp_path)) is None
+    (tmp_path / "DevToolsActivePort").write_text("9333\n/devtools/browser/x\n", encoding="utf-8")
+    assert read_devtools_port(str(tmp_path)) == 9333
+
+
+def test_workspace_file_stays_inside_computer(tmp_path):
+    svc = AgentComputerService(AgentComputerStore(tmp_path / "state.db"), data_root=tmp_path)
+    computer = svc.ensure_computer("bwm796-synth")
+    written = svc.write_workspace_upload(computer, "ok.txt", b"hello")
+    assert written["name"] == "ok.txt"
+    assert {item["name"] for item in svc.list_workspace_artifacts(computer)} == {"ok.txt"}
+    with pytest.raises(ForbiddenError):
+        svc.resolve_workspace_file(computer, "../etc/passwd")
+    from gateway.agent_computer.adapter import private_dir
+
+    locked = private_dir(tmp_path / "agent-computers" / "identities" / "bi_x")
+    assert (locked.stat().st_mode & 0o777) == 0o700
+    assert ((tmp_path / "agent-computers").stat().st_mode & 0o777) == 0o700
 
 
 def test_did_not_build_a_new_browser_runtime():

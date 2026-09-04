@@ -91,8 +91,9 @@ class AgentComputerService:
         if existing:
             return existing
         cid = f"ac_{uuid.uuid4().hex}"
-        persistence = str(self.data_root / "computers" / profile_id / cid)
-        Path(persistence).mkdir(parents=True, exist_ok=True)
+        from .adapter import private_dir
+
+        persistence = str(private_dir(self.data_root / "computers" / profile_id / cid))
         computer = AgentComputer(
             id=cid,
             agent_profile_id=profile_id,
@@ -245,6 +246,8 @@ class AgentComputerService:
                     pass
                 self._handles.pop(computer.id, None)
                 existing = None
+            if existing is None:
+                existing = self._attach_handle(computer)
             if (
                 existing
                 and self._runtime_alive(existing)
@@ -307,6 +310,22 @@ class AgentComputerService:
         except Exception:
             return False
 
+    def _attach_handle(self, computer: AgentComputer) -> RuntimeHandle | None:
+        attach = getattr(self.runtime, "attach", None)
+        if not callable(attach):
+            return None
+        identity = None
+        if computer.active_browser_identity_id:
+            identity = self.get_identity(computer.active_browser_identity_id)
+        try:
+            handle = attach(computer, identity)
+        except Exception:
+            return None
+        if handle is None:
+            return None
+        self._handles[computer.id] = handle
+        return handle
+
     def _handle(self, computer: AgentComputer) -> RuntimeHandle:
         handle = self._handles.get(computer.id)
         if handle and self._runtime_alive(handle):
@@ -317,6 +336,10 @@ class AgentComputerService:
             except Exception:
                 pass
             self._handles.pop(computer.id, None)
+        recovered = self._attach_handle(computer)
+        if recovered is not None:
+            self._audit(computer.id, "recovery", "system", {"reason": "reattach_runtime"})
+            return recovered
         identity = None
         if computer.active_browser_identity_id:
             identity = self.get_identity(computer.active_browser_identity_id)
@@ -330,10 +353,12 @@ class AgentComputerService:
         with self._lock:
             computer = self.get_computer(computer_id)
             self.authorize_read(computer, principal)
-            self._require_lease(computer, principal, lease_id, fencing_epoch, allow_owner=True)
+            if not is_owner_principal(principal):
+                self._require_lease(computer, principal, lease_id, fencing_epoch, allow_owner=True)
             computer = self.get_computer(computer_id)
             obs = self.runtime.observe(self._handle(computer))
-            computer.resume_observe_required = False
+            if not is_owner_principal(principal):
+                computer.resume_observe_required = False
             computer.workspace_url = obs.url
             computer.workspace_title = obs.title
             computer.updated_at = _iso(self.clock())
@@ -598,7 +623,11 @@ class AgentComputerService:
             "control": computer.control_authority.value,
             "fencing_epoch": computer.fencing_epoch,
             "resume_observe_required": computer.resume_observe_required,
-            "workspace": {"url": computer.workspace_url, "title": computer.workspace_title},
+            "workspace": {
+                "url": computer.workspace_url,
+                "title": computer.workspace_title,
+                "artifacts": self.list_workspace_artifacts(computer),
+            },
             "browser_identity": (
                 {
                     "id": identity.id,
@@ -621,6 +650,51 @@ class AgentComputerService:
                 else None
             ),
         }
+
+    def workspace_root(self, computer: AgentComputer) -> Path:
+        root = (Path(computer.persistence_ref) / "workspace").resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "downloads").mkdir(exist_ok=True)
+        (root / "uploads").mkdir(exist_ok=True)
+        return root
+
+    def list_workspace_artifacts(self, computer: AgentComputer) -> list[dict[str, Any]]:
+        items = []
+        root = self.workspace_root(computer)
+        for folder in ("downloads", "uploads"):
+            directory = root / folder
+            if not directory.is_dir():
+                continue
+            for path in sorted(directory.iterdir()):
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                items.append(
+                    {
+                        "name": path.name,
+                        "kind": folder.rstrip("s"),
+                        "size": path.stat().st_size,
+                    }
+                )
+        return items
+
+    def resolve_workspace_file(self, computer: AgentComputer, name: str, *, folder: str = "downloads") -> Path:
+        if folder not in {"downloads", "uploads"}:
+            raise ConflictError("invalid workspace folder")
+        basename = Path(name).name
+        if not basename or basename != name:
+            raise ForbiddenError("workspace file must be a basename")
+        root = self.workspace_root(computer)
+        path = (root / folder / basename).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ForbiddenError("workspace path escapes computer") from exc
+        return path
+
+    def write_workspace_upload(self, computer: AgentComputer, name: str, data: bytes) -> dict[str, Any]:
+        path = self.resolve_workspace_file(computer, name, folder="uploads")
+        path.write_bytes(data)
+        return {"name": path.name, "kind": "upload", "size": path.stat().st_size}
 
     def public_identity(self, identity: BrowserIdentity) -> dict[str, Any]:
         return {
@@ -745,6 +819,9 @@ class AgentComputerService:
             "message_text",
         }
         safe = {k: v for k, v in detail.items() if str(k).lower() not in redact}
+        lease = safe.get("lease_id")
+        if isinstance(lease, str) and len(lease) > 11:
+            safe["lease_id"] = lease[:11] + "…"
         self.store.append_audit(
             AuditEvent(
                 event_type=event_type,
