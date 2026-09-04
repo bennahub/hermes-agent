@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>C0 input fixture</title>
+<style>
+html,body{margin:0;background:#f4f1e8;color:#111;font-family:ui-sans-serif,system-ui,sans-serif}
+#bar{position:fixed;top:0;left:0;right:0;height:40px;background:#171915;color:#f4f1e8;display:flex;align-items:center;gap:16px;padding:0 16px;z-index:2;font-size:14px}
+#nextLink{position:absolute;left:80px;top:48px;font-size:22px}
+#clickBtn{position:absolute;left:80px;top:80px;width:320px;height:120px;font-size:28px;font-weight:700;background:#c9a227;border:0;cursor:pointer}
+#typeBox{position:absolute;left:80px;top:220px;width:480px;height:48px;font-size:24px}
+#scroller{position:absolute;left:80px;top:290px;width:640px;height:360px;overflow:auto;border:4px solid #333;background:#fff}
+#scrollInner{height:2200px;padding:16px;font-size:22px}
+#coords{position:absolute;left:80px;top:670px;font-size:20px}
+#keys{position:absolute;left:760px;top:80px;width:420px;min-height:160px;border:2px solid #333;padding:12px;background:#fff;font-size:18px}
+#submitted{display:none;position:absolute;left:580px;top:220px;background:#6fbf73;padding:10px 14px;font-size:20px}
+#submitted.on{display:block}
+</style>
+</head>
+<body>
+<div id="bar">
+  <span>clicks=<strong id="clickCount">0</strong></span>
+  <span>scrollTop=<strong id="scrollTop">0</strong></span>
+  <span>typed=<strong id="typedLen">0</strong></span>
+  <span id="lastAction">ready</span>
+</div>
+<a id="nextLink" href="./input_fixture_b.html">Open page B</a>
+<button id="clickBtn" type="button">CLICK ME</button>
+<form id="typeForm">
+  <input id="typeBox" type="text" autocomplete="off" spellcheck="false"/>
+</form>
+<div id="submitted">submitted</div>
+<div id="scroller"><div id="scrollInner">SCROLL AREA<br/>Keep scrolling.<br/>Marker at 400px: <span id="m400">400</span><br/><div style="margin-top:400px">deep-400</div><div style="margin-top:400px">deep-800</div><div style="margin-top:400px">deep-1200</div></div></div>
+<div id="coords">pointer x=0 y=0</div>
+<div id="keys">keys:</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let clicks = 0;
+$("clickBtn").addEventListener("click", () => {
+  clicks += 1;
+  $("clickCount").textContent = String(clicks);
+  $("lastAction").textContent = "click";
+});
+$("typeBox").addEventListener("input", () => {
+  $("typedLen").textContent = String($("typeBox").value.length);
+  $("lastAction").textContent = "type";
+});
+$("typeBox").addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter"){
+    $("submitted").classList.add("on");
+    $("lastAction").textContent = "enter";
+  }
+});
+$("typeForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  $("submitted").classList.add("on");
+  $("lastAction").textContent = "enter";
+});
+$("scroller").addEventListener("scroll", () => {
+  $("scrollTop").textContent = String($("scroller").scrollTop);
+  $("lastAction").textContent = "scroll";
+});
+document.addEventListener("mousemove", (ev) => {
+  $("coords").textContent = "pointer x="+Math.round(ev.clientX)+" y="+Math.round(ev.clientY);
+});
+document.addEventListener("keydown", (ev) => {
+  $("keys").textContent = "keys: "+ev.key;
+});
+window.__c0Fixture = function(){
+  return {
+    clicks: clicks,
+    scrollTop: $("scroller").scrollTop,
+    inputValue: $("typeBox").value,
+    submitted: $("submitted").classList.contains("on"),
+    lastAction: $("lastAction").textContent
+  };
+};
+</script>
+</body>
+</html>

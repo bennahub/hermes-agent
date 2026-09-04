@@ -14,7 +14,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .adapter import ComputerRuntime, InMemoryRuntime, RuntimeHandle, new_identity_profile_dir
+from .adapter import (
+    ComputerRuntime,
+    InMemoryRuntime,
+    RuntimeHandle,
+    new_identity_profile_dir,
+    page_needs_restore,
+    safe_workspace_url,
+)
+from .location import public_location
+from .stream import (
+    DEFAULT_JPEG_QUALITY,
+    DEFAULT_VIEWPORT_HEIGHT,
+    DEFAULT_VIEWPORT_WIDTH,
+    OwnerStreamSession,
+    apply_stream_event,
+    get_stream_hub,
+    normalize_owner_event,
+)
 from .errors import (
     CheckpointRequiredError,
     ConflictError,
@@ -45,6 +62,7 @@ from .models import (
     agent_principal,
     is_agent_principal,
     is_owner_principal,
+    project_control,
 )
 from .store import AgentComputerStore
 
@@ -114,6 +132,9 @@ class AgentComputerService:
         return computer
 
     def list_computers(self) -> list[AgentComputer]:
+        ids = [computer.id for computer in self.store.list_computers()]
+        for computer_id in ids:
+            self.expire_owner_if_needed(computer_id)
         return self.store.list_computers()
 
     def list_identities(self) -> list[BrowserIdentity]:
@@ -259,6 +280,7 @@ class AgentComputerService:
                         lease = self._issue_owner_lease(computer)
                     else:
                         lease = self._issue_agent_lease(computer)
+                self._restore_workspace(computer, existing)
                 computer.lifecycle = Lifecycle.READY
                 computer.updated_at = _iso(self.clock())
                 self.store.upsert_computer(computer)
@@ -272,6 +294,7 @@ class AgentComputerService:
                     raise RevokedError("attached browser identity is revoked")
             handle = self.runtime.wake(computer, identity)
             self._handles[computer.id] = handle
+            self._restore_workspace(computer, handle)
             computer.lifecycle = Lifecycle.READY
             computer.updated_at = _iso(self.clock())
             self.store.upsert_computer(computer)
@@ -326,6 +349,11 @@ class AgentComputerService:
         self._handles[computer.id] = handle
         return handle
 
+    def _drop_live_stream(self, computer_id: str) -> None:
+        live = get_stream_hub().get(computer_id)
+        if live:
+            get_stream_hub().drop(computer_id, live.generation)
+
     def _handle(self, computer: AgentComputer) -> RuntimeHandle:
         handle = self._handles.get(computer.id)
         if handle and self._runtime_alive(handle):
@@ -345,8 +373,26 @@ class AgentComputerService:
             identity = self.get_identity(computer.active_browser_identity_id)
         handle = self.runtime.wake(computer, identity)
         self._handles[computer.id] = handle
+        self._restore_workspace(computer, handle)
         self._audit(computer.id, "recovery", "system", {"reason": "recreate_runtime"})
         return handle
+
+    def _restore_workspace(self, computer: AgentComputer, handle: RuntimeHandle) -> None:
+        restore = getattr(self.runtime, "ensure_workspace", None)
+        if not callable(restore):
+            return
+        try:
+            restore(handle, computer.workspace_url)
+        except Exception:
+            return
+
+    def _remember_workspace(self, computer: AgentComputer, url: str, title: str = "") -> None:
+        saved = safe_workspace_url(url)
+        if not saved or page_needs_restore(saved):
+            return
+        computer.workspace_url = saved
+        if title:
+            computer.workspace_title = title
 
     # ── observe / act ────────────────────────────────────────────────
     def observe(self, computer_id: str, principal: str, *, lease_id: str, fencing_epoch: int) -> Observation:
@@ -359,8 +405,7 @@ class AgentComputerService:
             obs = self.runtime.observe(self._handle(computer))
             if not is_owner_principal(principal):
                 computer.resume_observe_required = False
-            computer.workspace_url = obs.url
-            computer.workspace_title = obs.title
+            self._remember_workspace(computer, obs.url, obs.title)
             computer.updated_at = _iso(self.clock())
             self.store.upsert_computer(computer)
             obs.fencing_epoch = computer.fencing_epoch
@@ -429,8 +474,7 @@ class AgentComputerService:
                 delta_x=delta_x,
                 delta_y=delta_y,
             )
-            computer.workspace_url = obs.url
-            computer.workspace_title = obs.title
+            self._remember_workspace(computer, obs.url, obs.title)
             computer.lifecycle = Lifecycle.READY
             computer.updated_at = _iso(self.clock())
             self.store.upsert_computer(computer)
@@ -556,6 +600,7 @@ class AgentComputerService:
             computer.updated_at = _iso(self.clock())
             self.store.upsert_computer(computer)
             self._owner_transports.pop(computer.id, None)
+            self._drop_live_stream(computer.id)
             self._audit(computer.id, "control_returned", principal, {"new_epoch": computer.fencing_epoch})
             return lease
 
@@ -574,6 +619,7 @@ class AgentComputerService:
             computer.updated_at = _iso(self.clock())
             self.store.upsert_computer(computer)
             self._owner_transports.pop(computer.id, None)
+            self._drop_live_stream(computer.id)
             self._audit(computer.id, "owner_disconnect", principal, {"new_epoch": computer.fencing_epoch})
             self._audit(computer.id, "fencing_recovery", "system", {"new_epoch": computer.fencing_epoch})
             return lease
@@ -595,6 +641,7 @@ class AgentComputerService:
             new_lease = self._issue_agent_lease(computer)
             self.store.upsert_computer(computer)
             self._owner_transports.pop(computer.id, None)
+            self._drop_live_stream(computer.id)
             self._audit(computer.id, "takeover_expired", "system", {"lease_id": lease.lease_id})
             self._audit(computer.id, "fencing_recovery", "system", {"new_epoch": computer.fencing_epoch})
             return new_lease
@@ -610,6 +657,133 @@ class AgentComputerService:
         self._audit(cp.computer_id, "checkpoint_approved", principal, {"checkpoint_id": cp.id})
         return cp
 
+    # ── owner stream ─────────────────────────────────────────────────
+    def open_owner_stream(
+        self,
+        computer_id: str,
+        principal: str,
+        *,
+        lease_id: str,
+        fencing_epoch: int,
+        width: int = 0,
+        height: int = 0,
+    ) -> tuple[OwnerStreamSession, AgentComputer]:
+        self.authorize_owner(principal)
+        with self._lock:
+            computer = self.get_computer(computer_id)
+            if computer.control_authority != ControlAuthority.OWNER_CONTROLLED:
+                raise ConflictError("computer is not owner-controlled")
+            self._require_lease(computer, principal, lease_id, fencing_epoch, allow_owner=True)
+            # Pin the Chromium source viewport. The Owner window may be any
+            # size; the canvas letterboxes/scales the 1440×900 frame. Using
+            # the stage CSS box as the CDP viewport made clicks miss.
+            _ = width, height
+            vw, vh = DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT
+            hub = get_stream_hub()
+            previous = hub.get(computer.id)
+            generation = hub.next_generation(computer.id)
+            session = OwnerStreamSession(
+                computer_id=computer.id,
+                identity_id=computer.active_browser_identity_id,
+                generation=generation,
+                lease_id=lease_id,
+                fencing_epoch=fencing_epoch,
+                viewport_width=vw,
+                viewport_height=vh,
+                jpeg_quality=DEFAULT_JPEG_QUALITY,
+            )
+            hub.attach(session)
+            handle = self._handles.get(computer.id) or self._attach_handle(computer)
+            if handle is not None:
+                self._restore_workspace(computer, handle)
+                try:
+                    obs = self.runtime.observe(handle)
+                    self._remember_workspace(computer, obs.url, obs.title)
+                    self.store.upsert_computer(computer)
+                except Exception:
+                    pass
+            self._audit(
+                computer.id,
+                "stream_replaced" if previous else "stream_opened",
+                principal,
+                {"generation": generation, "kind": "screencast"},
+            )
+            return session, computer
+
+    def owner_stream_input(
+        self,
+        computer_id: str,
+        principal: str,
+        *,
+        lease_id: str,
+        fencing_epoch: int,
+        generation: int,
+        event: dict,
+    ) -> dict:
+        self.authorize_owner(principal)
+        with self._lock:
+            computer = self.get_computer(computer_id)
+            if computer.control_authority != ControlAuthority.OWNER_CONTROLLED:
+                raise ConflictError("computer is not owner-controlled")
+            self._require_lease(computer, principal, lease_id, fencing_epoch, allow_owner=True)
+            session = get_stream_hub().get(computer.id)
+            if session is None or session.generation != int(generation):
+                raise StaleControllerError("stream generation is stale")
+            normalized = normalize_owner_event(
+                event,
+                viewport_width=session.viewport_width,
+                viewport_height=session.viewport_height,
+            )
+            kind = normalized.get("kind")
+            if kind == "ack":
+                session.ack(int(normalized.get("session_id") or 0))
+                if session._dispatch:
+                    session._dispatch(normalized)
+                return {"ok": True, "kind": "ack"}
+            if kind == "ping":
+                return {"ok": True, "kind": "ping"}
+            if kind == "cursor":
+                handle = self._handles.get(computer.id) or self._handle(computer)
+                probe = getattr(self.runtime, "probe_cursor", None)
+                raw = "default"
+                if callable(probe):
+                    try:
+                        raw = str(probe(handle, float(normalized["x"]), float(normalized["y"])) or "default")
+                    except Exception:
+                        raw = "default"
+                from .cursor import map_remote_cursor
+
+                return {"ok": True, "kind": "cursor", "cursor": map_remote_cursor(raw)}
+            if kind == "nav":
+                handle = self._handles.get(computer.id) or self._handle(computer)
+                loc = apply_stream_event(self.runtime, handle, normalized) or {}
+                raw_url = str((loc or {}).get("url") or "")
+                title = str((loc or {}).get("title") or "")
+                self._remember_workspace(computer, raw_url, title)
+                self.store.upsert_computer(computer)
+                from .location import public_location
+
+                pub = public_location(raw_url, title)
+                return {"ok": True, "kind": "nav", **pub}
+            if kind == "resize":
+                # Display-only. Chromium stays on the pinned source viewport
+                # so mapping does not drift mid-session.
+                return {"ok": True, "kind": kind}
+            # Frames stay on the stream websocket. Input uses loopback CDP —
+            # the same path that changes real page state on this host.
+            # Fire-and-forget on the screencast socket was received by audit
+            # but did not affect Chromium.
+            handle = self._handles.get(computer.id) or self._handle(computer)
+            apply_stream_event(self.runtime, handle, normalized)
+            session.last_input_kind = str(kind)
+            self._audit(computer.id, "stream_input", principal, {"kind": kind, "generation": session.generation})
+            return {"ok": True, "kind": kind}
+
+    def close_owner_stream(self, computer_id: str, generation: int) -> None:
+        """Stop the live stream only. Does not return control to the agent."""
+        get_stream_hub().drop(computer_id, generation)
+        self._audit(computer_id, "stream_closed", "owner", {"generation": generation})
+
     # ── public status ────────────────────────────────────────────────
     def public_status(self, computer: AgentComputer) -> dict[str, Any]:
         lease = self.store.active_lease_for_computer(computer.id)
@@ -621,6 +795,13 @@ class AgentComputerService:
             "agent_profile_id": computer.agent_profile_id,
             "lifecycle": computer.lifecycle.value,
             "control": computer.control_authority.value,
+            "control_label": project_control(computer.control_authority.value),
+            "can_resume": bool(
+                lease
+                and lease.controller == Controller.OWNER
+                and computer.control_authority == ControlAuthority.OWNER_CONTROLLED
+            ),
+            "location": public_location(computer.workspace_url, computer.workspace_title),
             "fencing_epoch": computer.fencing_epoch,
             "resume_observe_required": computer.resume_observe_required,
             "workspace": {
@@ -649,6 +830,11 @@ class AgentComputerService:
                 if lease
                 else None
             ),
+            "stream": {
+                "path": f"/api/agent-computers/{computer.id}/stream",
+                "kind": "screencast_frames",
+                "public_cdp": False,
+            },
         }
 
     def workspace_root(self, computer: AgentComputer) -> Path:

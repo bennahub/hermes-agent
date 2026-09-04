@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,10 @@ from hermes_cli.web_routers.agent_computer_ui import COMPUTER_UI_HTML
 
 router = APIRouter()
 _require_token = late("_require_token")
+_ws_auth_reason = late("_ws_auth_reason")
+_ws_host_origin_reason = late("_ws_host_origin_reason")
+_ws_client_reason = late("_ws_client_reason")
+_ws_close_reason = late("_ws_close_reason")
 
 
 class EnsureBody(BaseModel):
@@ -182,6 +186,167 @@ def give_back(request: Request, computer_id: str, body: LeaseBody):
         )
     except AgentComputerError as exc:
         raise _http(exc) from exc
+
+
+@router.websocket("/api/agent-computers/{computer_id}/stream")
+async def computer_stream(ws: WebSocket, computer_id: str):
+    """Authenticated Owner screencast. Loopback CDP never leaves the host.
+
+    Accept the upgrade before Chromium/lease work. Close-before-accept
+    becomes HTTP 403 with no close code — the browser then loops on
+    1006 / "Reconnecting..." and never renders a frame.
+    """
+    import asyncio
+    import logging
+
+    from gateway.agent_computer.stream import (
+        emit_memory_frame,
+        get_stream_hub,
+        run_chromium_screencast,
+    )
+
+    log = logging.getLogger("hermes.agent_computer.stream")
+    peer = ws.client.host if ws.client else "?"
+    auth_reason, cred = _ws_auth_reason(ws)
+    origin_reason = _ws_host_origin_reason(ws)
+    client_reason = _ws_client_reason(ws)
+    await ws.accept()
+
+    async def _reject(code: int, reason: str, *, retry: bool = False) -> None:
+        try:
+            await ws.send_json(
+                {"type": "error", "code": code, "reason": reason, "retry": retry}
+            )
+        except Exception:
+            pass
+        try:
+            await ws.close(code=code, reason=_ws_close_reason(reason))
+        except Exception:
+            pass
+
+    if auth_reason is not None:
+        log.warning(
+            "stream auth rejected reason=%s cred=%s peer=%s computer=%s",
+            auth_reason, cred, peer, computer_id,
+        )
+        await _reject(4401, "auth")
+        return
+    if origin_reason is not None:
+        log.warning("stream refused: %s peer=%s computer=%s", origin_reason, peer, computer_id)
+        await _reject(4403, "origin")
+        return
+    if client_reason is not None:
+        log.warning("stream refused: %s computer=%s", client_reason, computer_id)
+        await _reject(4403, "peer")
+        return
+
+    lease_id = str(ws.query_params.get("lease_id") or "")
+    try:
+        fencing_epoch = int(ws.query_params.get("fencing_epoch") or 0)
+        width = int(ws.query_params.get("width") or 0)
+        height = int(ws.query_params.get("height") or 0)
+    except ValueError:
+        await _reject(4400, "bad_params")
+        return
+
+    contract = get_contract()
+    principal = owner_principal()
+    try:
+        await ws.send_json({"type": "status", "phase": "starting"})
+        hello = await asyncio.to_thread(
+            lambda: contract.open_stream(
+                computer_id,
+                principal,
+                lease_id=lease_id,
+                fencing_epoch=fencing_epoch,
+                width=width,
+                height=height,
+            )
+        )
+    except AgentComputerError as exc:
+        log.warning(
+            "stream open rejected code=%s status=%s computer=%s",
+            exc.code, exc.http_status, computer_id,
+        )
+        await _reject(4403 if exc.http_status == 403 else 4409, exc.code.lower())
+        return
+
+    generation = int(hello.get("generation") or 0)
+    live = get_stream_hub().get(computer_id)
+    pump_task = None
+    cdp_task = None
+
+    async def _pump() -> None:
+        while live and not live.closed:
+            frame = live.pop_frame()
+            if frame:
+                await ws.send_json(live.public_frame(frame))
+            else:
+                await asyncio.sleep(0.02)
+
+    try:
+        await ws.send_json(hello)
+        if live is not None:
+            pump_task = asyncio.create_task(_pump())
+        handle = None
+        try:
+            handle = await asyncio.to_thread(contract.stream_runtime_handle, computer_id)
+        except Exception:
+            log.warning("stream runtime attach failed computer=%s", computer_id, exc_info=True)
+            handle = None
+        has_cdp = bool(handle is not None and getattr(handle, "cdp_loopback", None))
+        log.info("stream runtime computer=%s has_cdp=%s", computer_id, has_cdp)
+        if live and has_cdp:
+            async def _screencast() -> None:
+                try:
+                    await run_chromium_screencast(live, handle)
+                except Exception:
+                    log.warning("screencast ended computer=%s", computer_id, exc_info=True)
+                    try:
+                        await ws.send_json(
+                            {"type": "error", "code": 4500, "reason": "screencast", "retry": True}
+                        )
+                    except Exception:
+                        pass
+
+            cdp_task = asyncio.create_task(_screencast())
+        elif live is not None:
+            emit_memory_frame(live, str(hello.get("url") or ""))
+        while True:
+            message = await ws.receive_json()
+            result = contract.stream_input(
+                computer_id,
+                principal,
+                lease_id=lease_id,
+                fencing_epoch=fencing_epoch,
+                generation=generation,
+                event=message if isinstance(message, dict) else {},
+            )
+            if isinstance(result, dict) and result.get("kind") == "cursor" and result.get("cursor"):
+                await ws.send_json({"type": "cursor", "cursor": result["cursor"]})
+            if isinstance(result, dict) and result.get("kind") == "nav":
+                await ws.send_json(
+                    {
+                        "type": "location",
+                        "origin": result.get("origin") or "",
+                        "url": result.get("url") or "",
+                        "title": result.get("title") or "",
+                        "https": bool(result.get("https")),
+                    }
+                )
+    except WebSocketDisconnect:
+        pass
+    except AgentComputerError:
+        try:
+            await ws.close(code=4409)
+        except Exception:
+            pass
+    finally:
+        if pump_task:
+            pump_task.cancel()
+        if cdp_task:
+            cdp_task.cancel()
+        contract.close_stream(computer_id, generation)
 
 
 @router.post("/api/agent-computers/{computer_id}/owner-disconnect")

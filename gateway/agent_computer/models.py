@@ -91,8 +91,23 @@ AUDIT_EVENT_TYPES = frozenset(
         "checkpoint_blocked",
         "checkpoint_approved",
         "owner_disconnect",
+        "stream_opened",
+        "stream_closed",
+        "stream_input",
+        "stream_replaced",
     }
 )
+
+
+def project_control(authority: str) -> str:
+    """Single Owner-facing control label. UI and stream hello must use this."""
+    return {
+        "AGENT_CONTROLLED": "AGENT_CONTROL",
+        "TAKEOVER_PENDING": "TAKEOVER_PENDING",
+        "YIELDING": "YIELDING",
+        "OWNER_CONTROLLED": "OWNER_CONTROL",
+        "RETURNING": "RETURNING",
+    }.get(str(authority or ""), str(authority or ""))
 
 
 @dataclass

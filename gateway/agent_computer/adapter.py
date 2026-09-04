@@ -79,7 +79,7 @@ def chromium_launch_argv(
         "--disable-background-networking",
         "--disable-default-apps",
         "--force-device-scale-factor=1",
-        "--window-size=800,600",
+        "--window-size=1440,900",
         "--headless=new",
     ]
     extras = [item.strip() for item in (extra_args or []) if item and item.strip()]
@@ -154,6 +154,8 @@ class _Page:
     last_x: float = 0.0
     last_y: float = 0.0
     input_value: str = ""
+    history: list[str] = field(default_factory=list)
+    forward: list[str] = field(default_factory=list)
 
 
 class InMemoryRuntime:
@@ -193,6 +195,14 @@ class InMemoryRuntime:
             workspace_root=str(Path(computer.persistence_ref) / "workspace"),
         )
 
+    def ensure_workspace(self, handle: RuntimeHandle, workspace_url: str) -> None:
+        target = safe_workspace_url(workspace_url)
+        if not target:
+            return
+        page = self._page(f"id:{handle.identity_id}" if handle.identity_id else f"pc:{handle.computer_id}")
+        if page_needs_restore(page.url):
+            page.url = target
+
     def observe(self, handle: RuntimeHandle) -> Observation:
         key = f"id:{handle.identity_id}" if handle.identity_id else f"pc:{handle.computer_id}"
         with self._lock:
@@ -204,8 +214,8 @@ class InMemoryRuntime:
                 fencing_epoch=0,
                 controller="",
                 observed_at=_now(),
-                viewport_width=800,
-                viewport_height=600,
+                viewport_width=handle.viewport_width or 1440,
+                viewport_height=handle.viewport_height or 900,
             )
 
     def act(
@@ -270,9 +280,83 @@ class InMemoryRuntime:
                 fencing_epoch=0,
                 controller="",
                 observed_at=_now(),
-                viewport_width=800,
-                viewport_height=600,
+                viewport_width=handle.viewport_width or 1440,
+                viewport_height=handle.viewport_height or 900,
             )
+
+    def stream_pointer(
+        self,
+        handle: RuntimeHandle,
+        *,
+        phase: str,
+        x: float,
+        y: float,
+        click_count: int = 1,
+        buttons: int = 0,
+    ) -> None:
+        _ = buttons
+        if phase == "move":
+            self.act(handle, kind="pointer_move", x=x, y=y)
+        else:
+            self.act(handle, kind="pointer_click", x=x, y=y)
+            if click_count > 1:
+                self.act(handle, kind="pointer_click", x=x, y=y)
+
+    def stream_wheel(
+        self,
+        handle: RuntimeHandle,
+        *,
+        x: float,
+        y: float,
+        delta_x: float,
+        delta_y: float,
+    ) -> None:
+        self.act(handle, kind="scroll", x=x, y=y, delta_x=delta_x, delta_y=delta_y)
+
+    def stream_key(
+        self,
+        handle: RuntimeHandle,
+        *,
+        phase: str,
+        key: str,
+        code: str = "",
+        modifiers: int = 0,
+    ) -> None:
+        _ = modifiers
+        if phase == "down":
+            self.act(handle, kind="key", key=key, code=code)
+
+    def stream_nav(self, handle: RuntimeHandle, action: str, url: str = "") -> dict[str, str]:
+        page = self._page(f"id:{handle.identity_id}" if handle.identity_id else f"pc:{handle.computer_id}")
+        if action == "open":
+            target = safe_workspace_url(url)
+            if target:
+                page.history.append(page.url)
+                page.forward.clear()
+                page.url = target
+                page.title = target
+        elif action == "back" and page.history:
+            page.forward.append(page.url)
+            page.url = page.history.pop()
+        elif action == "forward" and page.forward:
+            page.history.append(page.url)
+            page.url = page.forward.pop()
+        elif action == "reload":
+            page.title = page.title or page.url
+        return {"url": page.url, "title": page.title}
+
+    def probe_cursor(self, handle: RuntimeHandle, x: float, y: float) -> str:
+        page = self._page(f"id:{handle.identity_id}" if handle.identity_id else f"pc:{handle.computer_id}")
+        _ = page
+        if 80 <= x <= 400 and 80 <= y <= 200:
+            return "pointer"
+        if 80 <= x <= 560 and 220 <= y <= 268:
+            return "text"
+        return "default"
+
+    def apply_viewport(self, handle: RuntimeHandle, width: int, height: int) -> None:
+        handle.viewport_width = int(width)
+        handle.viewport_height = int(height)
 
     def sleep(self, handle: RuntimeHandle) -> None:
         key = f"id:{handle.identity_id}" if handle.identity_id else f"pc:{handle.computer_id}"
@@ -317,12 +401,13 @@ class HermesChromiumRuntime:
         import subprocess
         import time
 
+        user_data = str(Path(user_data).resolve())
+        self._reap_dead_profile_browser(user_data, computer.id)
         port_file = os.path.join(user_data, "DevToolsActivePort")
         try:
             os.unlink(port_file)
         except OSError:
             pass
-        user_data = str(Path(user_data).resolve())
         downloads = Path(computer.persistence_ref) / "workspace" / "downloads"
         downloads.mkdir(parents=True, exist_ok=True)
         argv = chromium_launch_argv(
@@ -386,12 +471,14 @@ class HermesChromiumRuntime:
                 handle,
                 "Emulation.setDeviceMetricsOverride",
                 {
-                    "width": 800,
-                    "height": 600,
+                    "width": 1440,
+                    "height": 900,
                     "deviceScaleFactor": 1,
                     "mobile": False,
                 },
             )
+            handle.viewport_width = 1440
+            handle.viewport_height = 900
         except Exception:
             pass
         downloads = Path(handle.workspace_root) / "downloads"
@@ -423,7 +510,58 @@ class HermesChromiumRuntime:
             )
         except Exception:
             pass
+        try:
+            self.ensure_workspace(handle, computer.workspace_url)
+        except Exception:
+            pass
         return handle
+
+    def _reap_dead_profile_browser(self, user_data: str, computer_id: str) -> None:
+        """Reap a leftover Chromium that still holds this profile after CDP died.
+
+        ``hermes-serve`` restarts leave chrome in the cgroup. Attach then
+        fails (``DevToolsActivePort`` present, TCP dead) and the next
+        ``wake()`` waits 30s on SingletonLock without exposing a port —
+        which blocked the Owner live-view handshake.
+        """
+        port = read_devtools_port(user_data)
+        pid = None
+        try:
+            raw = Path(user_data).joinpath("chromium.pid").read_text(encoding="utf-8").strip()
+            if raw.isdigit():
+                pid = int(raw)
+        except OSError:
+            pid = None
+        if port:
+            probe = RuntimeHandle(
+                computer_id=computer_id,
+                identity_id=None,
+                user_data_dir=user_data,
+                cdp_loopback=f"http://127.0.0.1:{port}",
+                process_id=pid,
+                backend="hermes_chromium",
+                headed_same_host=False,
+                workspace_root=str(Path(user_data) / "workspace"),
+            )
+            if self.alive(probe):
+                return
+        if not pid:
+            return
+        try:
+            self.sleep(
+                RuntimeHandle(
+                    computer_id=computer_id,
+                    identity_id=None,
+                    user_data_dir=user_data,
+                    cdp_loopback=None,
+                    process_id=pid,
+                    backend="hermes_chromium",
+                    headed_same_host=False,
+                    workspace_root=str(Path(user_data) / "workspace"),
+                )
+            )
+        except Exception:
+            pass
 
     def attach(self, computer: AgentComputer, identity: BrowserIdentity | None) -> RuntimeHandle | None:
         """Reconnect to an already-running loopback Chromium for this identity."""
@@ -452,6 +590,56 @@ class HermesChromiumRuntime:
             return None
         return handle
 
+    def ensure_workspace(self, handle: RuntimeHandle, workspace_url: str) -> None:
+        target = safe_workspace_url(workspace_url)
+        if not target:
+            return
+        current = "about:blank"
+        try:
+            result = loopback_cdp(
+                handle,
+                "Runtime.evaluate",
+                {"expression": "location.href", "returnByValue": True},
+            ) or {}
+            current = str(((result.get("result") or {}).get("value")) or "about:blank")
+        except Exception:
+            current = "about:blank"
+        if not page_needs_restore(current):
+            return
+        import time
+
+        loopback_cdp(handle, "Page.enable", {})
+        loopback_cdp(handle, "Page.navigate", {"url": target})
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            try:
+                result = loopback_cdp(
+                    handle,
+                    "Runtime.evaluate",
+                    {"expression": "location.href", "returnByValue": True},
+                ) or {}
+                href = str(((result.get("result") or {}).get("value")) or "")
+                if href.startswith(("https://", "http://", "file://")):
+                    try:
+                        loopback_cdp(
+                            handle,
+                            "Emulation.setDeviceMetricsOverride",
+                            {
+                                "width": 1440,
+                                "height": 900,
+                                "deviceScaleFactor": 1,
+                                "mobile": False,
+                            },
+                        )
+                        handle.viewport_width = 1440
+                        handle.viewport_height = 900
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+            time.sleep(0.2)
+
     def observe(self, handle: RuntimeHandle) -> Observation:
         page = loopback_cdp(handle, "Runtime.evaluate", {
             "expression": (
@@ -468,7 +656,7 @@ class HermesChromiumRuntime:
             shot = loopback_cdp(
                 handle,
                 "Page.captureScreenshot",
-                {"format": "jpeg", "quality": 40},
+                {"format": "jpeg", "quality": 80},
             ) or {}
         except Exception:
             shot = {}
@@ -485,8 +673,12 @@ class HermesChromiumRuntime:
         vp_h = int(value.get("viewportHeight") or 0)
         handle.screenshot_width = shot_w
         handle.screenshot_height = shot_h
-        handle.viewport_width = vp_w
-        handle.viewport_height = vp_h
+        # Keep the designed source viewport. innerHeight on a restored tab
+        # is often 757 — writing that back made stream clicks remapped.
+        if handle.viewport_width <= 0:
+            handle.viewport_width = vp_w or 1440
+        if handle.viewport_height <= 0:
+            handle.viewport_height = vp_h or 900
         return Observation(
             url=str(value.get("url") or ""),
             title=str(value.get("title") or ""),
@@ -736,12 +928,147 @@ class HermesChromiumRuntime:
         y: float,
         *,
         click_count: int = 0,
+        buttons: int = 0,
     ) -> None:
-        params: dict[str, Any] = {"type": event, "x": x, "y": y}
+        params: dict[str, Any] = {"type": event, "x": x, "y": y, "buttons": buttons}
         if event in ("mousePressed", "mouseReleased"):
             params["button"] = "left"
             params["clickCount"] = click_count or 1
         loopback_cdp(handle, "Input.dispatchMouseEvent", params)
+
+    def stream_pointer(
+        self,
+        handle: RuntimeHandle,
+        *,
+        phase: str,
+        x: float,
+        y: float,
+        click_count: int = 1,
+        buttons: int = 0,
+    ) -> None:
+        # Already mapped to Chromium CSS pixels by normalize_owner_event.
+        # Do not run screenshot→viewport again — that misses clicks whenever
+        # the last JPEG / innerHeight disagrees with the pinned 1440×900.
+        vx, vy = float(x), float(y)
+        handle.last_pointer_x = vx
+        handle.last_pointer_y = vy
+        held = 1 if int(buttons or 0) else (1 if phase in ("down", "click") else 0)
+        if phase == "move":
+            self._mouse(handle, "mouseMoved", vx, vy, buttons=held)
+            return
+        if phase == "down":
+            self._mouse(handle, "mouseMoved", vx, vy, buttons=0)
+            self._mouse(handle, "mousePressed", vx, vy, click_count=click_count, buttons=1)
+            return
+        if phase == "up":
+            self._mouse(handle, "mouseReleased", vx, vy, click_count=click_count, buttons=0)
+            return
+        self._mouse(handle, "mouseMoved", vx, vy, buttons=0)
+        self._mouse(handle, "mousePressed", vx, vy, click_count=click_count, buttons=1)
+        self._mouse(handle, "mouseReleased", vx, vy, click_count=click_count, buttons=0)
+
+    def stream_wheel(
+        self,
+        handle: RuntimeHandle,
+        *,
+        x: float,
+        y: float,
+        delta_x: float,
+        delta_y: float,
+    ) -> None:
+        vx, vy = float(x), float(y)
+        handle.last_pointer_x = vx
+        handle.last_pointer_y = vy
+        loopback_cdp(
+            handle,
+            "Input.dispatchMouseEvent",
+            {"type": "mouseWheel", "x": vx, "y": vy, "deltaX": delta_x, "deltaY": delta_y},
+        )
+
+    def stream_key(
+        self,
+        handle: RuntimeHandle,
+        *,
+        phase: str,
+        key: str,
+        code: str = "",
+        modifiers: int = 0,
+    ) -> None:
+        from .keys import cdp_key_params, is_printable_key
+
+        if phase == "down" and is_printable_key(key, modifiers):
+            loopback_cdp(handle, "Input.insertText", {"text": key})
+            return
+        loopback_cdp(handle, "Input.dispatchKeyEvent", cdp_key_params(phase=phase, key=key, code=code, modifiers=modifiers))
+
+    def current_location(self, handle: RuntimeHandle) -> dict[str, str]:
+        try:
+            result = loopback_cdp(
+                handle,
+                "Runtime.evaluate",
+                {
+                    "expression": "({url: location.href, title: document.title || ''})",
+                    "returnByValue": True,
+                },
+            ) or {}
+            value = ((result.get("result") or {}).get("value")) or {}
+            return {"url": str(value.get("url") or ""), "title": str(value.get("title") or "")}
+        except Exception:
+            return {"url": "", "title": ""}
+
+    def stream_nav(self, handle: RuntimeHandle, action: str, url: str = "") -> dict[str, str]:
+        import time
+
+        if action == "back":
+            loopback_cdp(handle, "Page.goBack", {})
+        elif action == "forward":
+            loopback_cdp(handle, "Page.goForward", {})
+        elif action == "reload":
+            loopback_cdp(handle, "Page.reload", {})
+        elif action == "open":
+            target = safe_workspace_url(url)
+            if target:
+                loopback_cdp(handle, "Page.navigate", {"url": target})
+        time.sleep(0.35)
+        try:
+            loopback_cdp(
+                handle,
+                "Emulation.setDeviceMetricsOverride",
+                {"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            )
+            handle.viewport_width = 1440
+            handle.viewport_height = 900
+        except Exception:
+            pass
+        return self.current_location(handle)
+
+    def probe_cursor(self, handle: RuntimeHandle, x: float, y: float) -> str:
+        from .cursor import cursor_probe_expression
+
+        result = loopback_cdp(
+            handle,
+            "Runtime.evaluate",
+            {"expression": cursor_probe_expression(x, y), "returnByValue": True},
+        ) or {}
+        value = ((result.get("result") or {}).get("value"))
+        return str(value or "default")
+
+    def apply_viewport(self, handle: RuntimeHandle, width: int, height: int) -> None:
+        handle.viewport_width = int(width)
+        handle.viewport_height = int(height)
+        try:
+            loopback_cdp(
+                handle,
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": handle.viewport_width,
+                    "height": handle.viewport_height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            )
+        except Exception:
+            pass
 
     def alive(self, handle: RuntimeHandle) -> bool:
         import urllib.request
@@ -832,6 +1159,40 @@ class HermesChromiumRuntime:
             time.sleep(0.05)
 
 
+def safe_workspace_url(url: str) -> str:
+    """Allow only http(s)/file workspace restores. Never javascript/data/chrome."""
+    raw = (url or "").strip()
+    if raw.startswith(("https://", "http://", "file://")):
+        return raw
+    return ""
+
+
+def page_needs_restore(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw or raw == "about:blank":
+        return True
+    return raw.startswith(("chrome://", "chrome-error://", "chrome-untrusted://", "devtools://", "about:"))
+
+
+def pick_page_target(pages: list[Any]) -> dict[str, Any] | None:
+    """Prefer the visible working page over about:blank / chrome:// leftovers."""
+    candidates = [p for p in pages if isinstance(p, dict) and p.get("type") == "page"]
+    if not candidates:
+        return None
+
+    def score(page: dict[str, Any]) -> tuple[int, int]:
+        url = str(page.get("url") or "")
+        if url.startswith(("chrome://", "chrome-untrusted://", "devtools://")):
+            return (0, 0)
+        if url in ("", "about:blank"):
+            return (1, 0)
+        if url.startswith(("file:", "http://", "https://")):
+            return (3, 1 if page.get("webSocketDebuggerUrl") else 0)
+        return (2, 0)
+
+    return max(candidates, key=score)
+
+
 def _loopback_ws(handle: RuntimeHandle) -> tuple[str, str | None]:
     if not handle.cdp_loopback or not handle.cdp_loopback.startswith("http://127.0.0.1:"):
         raise RuntimeError("refusing CDP on a non-loopback handle")
@@ -860,7 +1221,7 @@ def _loopback_ws(handle: RuntimeHandle) -> tuple[str, str | None]:
         with urllib.request.urlopen(f"{base}/json/list", timeout=5) as resp:
             pages = json.load(resp)
         if isinstance(pages, list):
-            page = next((p for p in pages if p.get("type") == "page"), None)
+            page = pick_page_target(pages)
             if page:
                 target_id = page.get("id")
     except Exception:

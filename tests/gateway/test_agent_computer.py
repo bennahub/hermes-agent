@@ -730,6 +730,9 @@ def test_headed_same_host_is_false_on_public_contract(tmp_path):
     assert obs["live_view"]["remote_stream"] is False
     takeover = contract.request_takeover(computer.id, OWNER_PRINCIPAL)
     assert takeover["live_view"]["headed_same_host"] is False
+    assert takeover["live_view"]["kind"] == "screencast_frames"
+    assert takeover["live_view"]["remote_stream"] is True
+    assert takeover["live_view"]["public_cdp"] is False
     assert "headed_same_host\": true" not in str(takeover).lower().replace(" ", "")
 
 
