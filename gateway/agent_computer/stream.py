@@ -1,4 +1,4 @@
-"""Owner takeover stream: CDP screencast frames + direct input.
+"""Owner takeover stream: bounded private CDP frames + direct input.
 
 Frames stay on the authenticated Hermes hop. Loopback CDP is never part
 of the public payload. Side REST observe/act remains fallback only.
@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .adapter import RuntimeHandle
-from .keys import cdp_key_params, is_printable_key
 from .models import project_control
 from .pointer import map_owner_pointer
 
@@ -44,6 +43,7 @@ class StreamFrame:
     height: int
     seq: int
     generation: int
+    location: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -52,7 +52,7 @@ class FrameBroker:
 
     max_inflight: int = MAX_INFLIGHT_FRAMES
     pending: deque[int] = field(default_factory=deque)
-    acked: list[int] = field(default_factory=list)
+    acked: deque[int] = field(default_factory=lambda: deque(maxlen=128))
     dropped: int = 0
     emitted: int = 0
 
@@ -92,8 +92,8 @@ class OwnerStreamSession:
     closed: bool = False
     last_input_kind: str = ""
     _seq: int = 0
+    location: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
-    _dispatch: Callable[[dict[str, Any]], None] | None = None
     _stop_cdp: Callable[[], None] | None = None
 
     def push_frame(self, session_id: int, data: str, width: int, height: int, mime: str = "image/jpeg") -> StreamFrame | None:
@@ -109,6 +109,7 @@ class OwnerStreamSession:
                 height=height or self.viewport_height,
                 seq=self._seq,
                 generation=self.generation,
+                location=dict(self.location),
             )
             self.frames.append(frame)
             return frame
@@ -153,6 +154,7 @@ class OwnerStreamSession:
             "height": frame.height,
             "seq": frame.seq,
             "generation": frame.generation,
+            "location": frame.location,
         }
 
     def close(self) -> None:
@@ -401,29 +403,26 @@ def emit_memory_frame(session: OwnerStreamSession, page_url: str = "") -> Stream
     return session.push_frame(session.broker.emitted + 1, data, session.viewport_width, session.viewport_height)
 
 async def run_chromium_screencast(session: OwnerStreamSession, handle: RuntimeHandle) -> None:
-    """Persistent loopback CDP frames. Requires an already-awake Chromium.
+    """Bounded live frames over one private CDP connection.
 
-    Commands wait on a concurrent reader. Sending before that reader
-    starts deadlocks every CDP call (8s timeout) and yields a black view.
+    The installed headless Chromium does not emit Page.startScreencast
+    frames. Capture on the persistent socket, with only two unacknowledged
+    frames. Owner input remains on the service's synchronous fenced path.
     """
     from tools.browser_cdp_tool import websockets
-
     from .adapter import _loopback_ws
+    from .location import public_location
 
     if websockets is None:
-        raise RuntimeError("websockets is required for Chromium screencast")
+        raise RuntimeError("websockets is required for Chromium streaming")
     if not handle.cdp_loopback:
         raise RuntimeError("chromium handle has no loopback CDP")
-    ws_url, target_id = _loopback_ws(handle)
+    ws_url, target_id = await asyncio.to_thread(_loopback_ws, handle)
     stop = threading.Event()
     session._stop_cdp = stop.set
 
     async with websockets.connect(
-        ws_url,
-        max_size=None,
-        open_timeout=8,
-        close_timeout=5,
-        ping_interval=None,
+        ws_url, max_size=None, open_timeout=8, close_timeout=2, ping_interval=None,
     ) as ws:
         next_id = 1
         cdp_session = None
@@ -436,262 +435,62 @@ async def run_chromium_screencast(session: OwnerStreamSession, handle: RuntimeHa
             req: dict[str, Any] = {"id": call_id, "method": method, "params": params or {}}
             if cdp_session:
                 req["sessionId"] = cdp_session
-            loop = asyncio.get_running_loop()
-            fut: asyncio.Future = loop.create_future()
+            fut = asyncio.get_running_loop().create_future()
             pending[call_id] = fut
-            await ws.send(json.dumps(req))
-            return await asyncio.wait_for(fut, timeout=8)
+            try:
+                await ws.send(json.dumps(req))
+                return await asyncio.wait_for(fut, timeout=8)
+            finally:
+                pending.pop(call_id, None)
 
         async def reader() -> None:
-            while not session.closed and not stop.is_set():
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-                except Exception:
-                    return
-                msg = json.loads(raw)
-                mid = msg.get("id")
-                if mid in pending:
-                    fut = pending.pop(mid)
-                    if "error" in msg:
-                        if not fut.done():
-                            fut.set_exception(RuntimeError(str(msg["error"])))
-                    elif not fut.done():
-                        fut.set_result(msg.get("result") or {})
-                    continue
-                if msg.get("method") == "Page.screencastFrame":
-                    params = msg.get("params") or {}
-                    sid = int(params.get("sessionId") or 0)
-                    meta = params.get("metadata") or {}
-                    accepted = session.push_frame(
-                        sid,
-                        str(params.get("data") or ""),
-                        int(meta.get("deviceWidth") or session.viewport_width),
-                        int(meta.get("deviceHeight") or session.viewport_height),
-                    )
-                    if accepted is None:
-                        try:
-                            await send("Page.screencastFrameAck", {"sessionId": sid})
-                        except Exception:
-                            return
-
-        input_q: asyncio.Queue = asyncio.Queue(maxsize=128)
-        input_pending = 0
-        loop = asyncio.get_running_loop()
-
-        async def screenshot_pump() -> None:
-            while not session.closed and not stop.is_set():
-                if input_pending:
-                    await asyncio.sleep(0.01)
-                    continue
-                try:
-                    shot = await send(
-                        "Page.captureScreenshot",
-                        {"format": "jpeg", "quality": session.jpeg_quality},
-                    )
-                    data = str((shot or {}).get("data") or "")
-                    if data:
-                        session.push_frame(
-                            session.broker.emitted + 1,
-                            data,
-                            session.viewport_width,
-                            session.viewport_height,
-                        )
-                except Exception:
-                    if session.closed or stop.is_set():
-                        return
-                await asyncio.sleep(0.08)
-
-        async def apply_input(event: dict[str, Any]) -> None:
-            kind = event.get("kind")
-            if kind == "ack":
-                sid = int(event.get("session_id") or 0)
-                session.ack(sid)
-                try:
-                    await send("Page.screencastFrameAck", {"sessionId": sid})
-                except Exception:
-                    return
-                return
-            if kind == "pointer":
-                phase = event.get("phase")
-                x, y = float(event.get("x") or 0), float(event.get("y") or 0)
-                click_count = int(event.get("click_count") or 1)
-                buttons = 1 if int(event.get("buttons") or 0) else (1 if phase in ("down", "click") else 0)
-                try:
-                    if phase == "move":
-                        await send(
-                            "Input.dispatchMouseEvent",
-                            {"type": "mouseMoved", "x": x, "y": y, "buttons": buttons},
-                        )
-                        return
-                    if phase in ("down", "click"):
-                        await send(
-                            "Input.dispatchMouseEvent",
-                            {"type": "mouseMoved", "x": x, "y": y, "buttons": 0},
-                        )
-                        await send(
-                            "Input.dispatchMouseEvent",
-                            {
-                                "type": "mousePressed",
-                                "x": x,
-                                "y": y,
-                                "button": "left",
-                                "clickCount": click_count,
-                                "buttons": 1,
-                            },
-                        )
-                    if phase in ("up", "click"):
-                        await send(
-                            "Input.dispatchMouseEvent",
-                            {
-                                "type": "mouseReleased",
-                                "x": x,
-                                "y": y,
-                                "button": "left",
-                                "clickCount": click_count,
-                                "buttons": 0,
-                            },
-                        )
-                except Exception:
-                    return
-                return
-            if kind == "wheel":
-                try:
-                    await send(
-                        "Input.dispatchMouseEvent",
-                        {
-                            "type": "mouseWheel",
-                            "x": float(event.get("x") or 0),
-                            "y": float(event.get("y") or 0),
-                            "deltaX": float(event.get("delta_x") or 0),
-                            "deltaY": float(event.get("delta_y") or 0),
-                        },
-                    )
-                except Exception:
-                    return
-                return
-            if kind == "key":
-                phase = str(event.get("phase") or "down")
-                key = str(event.get("key") or "")
-                modifiers = int(event.get("modifiers") or 0)
-                try:
-                    if phase == "down" and is_printable_key(key, modifiers):
-                        await send("Input.insertText", {"text": key})
-                        return
-                    await send(
-                        "Input.dispatchKeyEvent",
-                        cdp_key_params(
-                            phase=phase,
-                            key=key,
-                            code=str(event.get("code") or ""),
-                            modifiers=modifiers,
-                        ),
-                    )
-                except Exception:
-                    return
-                return
-            if kind == "text":
-                text = str(event.get("text") or "")
-                if text:
-                    try:
-                        await send("Input.insertText", {"text": text})
-                    except Exception:
-                        return
-
-        async def input_worker() -> None:
-            nonlocal input_pending
-            while not session.closed and not stop.is_set():
-                try:
-                    event = await asyncio.wait_for(input_q.get(), timeout=0.2)
-                except asyncio.TimeoutError:
-                    continue
-                input_pending += 1
-                try:
-                    await apply_input(event)
-                finally:
-                    input_pending -= 1
-
-        def dispatch(event: dict[str, Any]) -> None:
-            if session.closed or stop.is_set():
-                return
-
-            def _put() -> None:
-                try:
-                    input_q.put_nowait(event)
-                except asyncio.QueueFull:
-                    if event.get("kind") == "pointer" and event.get("phase") == "move":
-                        return
-                    try:
-                        input_q.get_nowait()
-                    except Exception:
-                        return
-                    try:
-                        input_q.put_nowait(event)
-                    except Exception:
-                        return
-
             try:
-                running = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-            if running is loop:
-                _put()
-            else:
-                loop.call_soon_threadsafe(_put)
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    fut = pending.get(msg.get("id"))
+                    if fut is None or fut.done():
+                        continue
+                    if "error" in msg:
+                        # CDP error text can contain page data. Keep it private.
+                        fut.set_exception(RuntimeError("private browser command failed"))
+                    else:
+                        fut.set_result(msg.get("result") or {})
+            finally:
+                for fut in list(pending.values()):
+                    if not fut.done():
+                        fut.set_exception(RuntimeError("private browser connection closed"))
 
-        session._dispatch = dispatch
         reader_task = asyncio.create_task(reader())
-        input_task = asyncio.create_task(input_worker())
-        fallback_task = None
         try:
             if target_id:
                 attached = await send("Target.attachToTarget", {"targetId": target_id, "flatten": True})
-                cdp_session = (attached or {}).get("sessionId")
-            await send("Page.enable", {})
-            try:
-                await send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-            except Exception:
-                pass
-            try:
-                await send("Page.bringToFront", {})
-            except Exception:
-                pass
-            await send(
-                "Emulation.setDeviceMetricsOverride",
-                {
-                    "width": session.viewport_width,
-                    "height": session.viewport_height,
-                    "deviceScaleFactor": 1,
-                    "mobile": False,
-                },
-            )
-            try:
-                await send(
-                    "Page.startScreencast",
-                    {
-                        "format": "jpeg",
-                        "quality": session.jpeg_quality,
-                        "maxWidth": session.viewport_width,
-                        "maxHeight": session.viewport_height,
-                        "everyNthFrame": 1,
-                    },
-                )
-            except Exception:
-                pass
-            fallback_task = asyncio.create_task(screenshot_pump())
+                cdp_session = attached.get("sessionId")
+            await send("Page.enable")
+            await send("Emulation.setDeviceMetricsOverride", {
+                "width": session.viewport_width, "height": session.viewport_height,
+                "deviceScaleFactor": 1, "mobile": False,
+            })
             while not session.closed and not stop.is_set():
-                await asyncio.sleep(0.2)
-        except Exception:
-            if session.closed or stop.is_set():
-                return
-            raise
+                if reader_task.done():
+                    raise RuntimeError("private browser connection closed")
+                if session.broker.inflight >= session.broker.max_inflight:
+                    await asyncio.sleep(0.02)
+                    continue
+                page = await send("Runtime.evaluate", {
+                    "expression": "({url: location.href, title: document.title || ''})",
+                    "returnByValue": True,
+                })
+                value = (page.get("result") or {}).get("value") or {}
+                session.location = public_location(str(value.get("url") or ""), str(value.get("title") or ""))
+                shot = await send("Page.captureScreenshot", {
+                    "format": "jpeg", "quality": session.jpeg_quality,
+                })
+                if shot.get("data"):
+                    session.push_frame(
+                        session._seq + 1, str(shot["data"]),
+                        session.viewport_width, session.viewport_height,
+                    )
+                await asyncio.sleep(0.08)
         finally:
-            if fallback_task:
-                fallback_task.cancel()
-            input_task.cancel()
             reader_task.cancel()
-            try:
-                await send("Page.stopScreencast", {})
-            except Exception:
-                pass
+            await asyncio.gather(reader_task, return_exceptions=True)

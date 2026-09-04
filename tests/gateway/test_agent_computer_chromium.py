@@ -638,3 +638,165 @@ def _cdp_up(url: str | None) -> bool:
             return True
     except Exception:
         return False
+
+
+@requires_chrome
+def test_real_chromium_stream_history_location_and_idle_backpressure(chromium_pair, local_page):
+    import asyncio
+    from gateway.agent_computer.adapter import loopback_cdp
+    from gateway.agent_computer.stream import OwnerStreamSession, run_chromium_screencast
+
+    svc, runtime, _ = chromium_pair
+    computer, _, agent, _ = _boot(svc)
+    handle = svc._handles[computer.id]
+    first_url = local_page
+    second_url = local_page.replace('synthetic.html', 'human.html')
+    runtime.stream_nav(handle, 'open', first_url)
+    # This used to call nonexistent Page.goBack/Page.goForward methods.
+    runtime.stream_nav(handle, 'open', second_url)
+    assert runtime.stream_nav(handle, 'back')['url'] == first_url
+    assert runtime.stream_nav(handle, 'forward')['url'] == second_url
+    assert runtime.stream_nav(handle, 'reload')['url'] == second_url
+    session = OwnerStreamSession(computer.id, computer.active_browser_identity_id, 1, 'test-stream', 1)
+
+    async def scenario():
+        task = asyncio.create_task(run_chromium_screencast(session, handle))
+        async def frame_where(predicate):
+            deadline = asyncio.get_running_loop().time() + 8
+            while asyncio.get_running_loop().time() < deadline:
+                if task.done():
+                    await task
+                    raise AssertionError('stream stopped unexpectedly')
+                frame = session.pop_frame()
+                if frame is not None:
+                    session.ack(frame.session_id)
+                    if predicate(frame): return frame
+                await asyncio.sleep(.03)
+            raise AssertionError('no matching live frame')
+        try:
+            frame = await frame_where(lambda f: f.location['url'] == second_url)
+            assert frame.data
+            assert frame.location['title'] == 'BWM-796 Human'
+            # Natural pointer input occurs while the persistent frame connection runs.
+            await asyncio.to_thread(runtime.stream_pointer, handle, phase='click', x=166, y=100)
+            await asyncio.to_thread(runtime.stream_key, handle, phase='down', key='x', code='KeyX')
+            result = await asyncio.to_thread(loopback_cdp, handle, 'Runtime.evaluate', {'expression': 'document.getElementById("box").value', 'returnByValue': True})
+            assert result['result']['value'] == 'x'
+            await asyncio.to_thread(runtime.stream_key, handle, phase='down', key='a', code='KeyA', modifiers=2)
+            await asyncio.to_thread(runtime.stream_key, handle, phase='up', key='a', code='KeyA', modifiers=2)
+            await asyncio.to_thread(runtime.stream_key, handle, phase='down', key='y', code='KeyY')
+            result = await asyncio.to_thread(loopback_cdp, handle, 'Runtime.evaluate', {'expression': 'document.getElementById("box").value', 'returnByValue': True})
+            assert result['result']['value'] == 'y'
+            await asyncio.to_thread(runtime.stream_key, handle, phase='down', key='Backspace', code='Backspace')
+            result = await asyncio.to_thread(loopback_cdp, handle, 'Runtime.evaluate', {'expression': 'document.getElementById("box").value', 'returnByValue': True})
+            assert result['result']['value'] == ''
+            # Navigation not initiated by the takeover toolbar still updates frame truth.
+            await asyncio.to_thread(loopback_cdp, handle, 'Runtime.evaluate', {'expression': 'location.href=' + repr(first_url)})
+            frame = await frame_where(lambda f: f.location['url'] == first_url)
+            assert frame.location['title'] == 'BWM-796 Synthetic'
+            await asyncio.sleep(.6)
+            emitted = session.broker.emitted
+            assert session.broker.inflight <= 2
+            await asyncio.sleep(.6)
+            assert session.broker.emitted == emitted
+            assert len(session.frames) <= 2
+        finally:
+            session.close()
+            await asyncio.wait_for(task, timeout=5)
+    asyncio.run(scenario())
+    # A link/Enter navigation survives suspend rather than restoring a stale toolbar URL.
+    svc.sleep(computer.id, agent)
+    assert svc.get_computer(computer.id).workspace_url == first_url
+    svc.wake(computer.id, agent)
+    assert runtime.current_location(svc._handles[computer.id])['url'] == first_url
+
+
+def _takeover_client_fixture():
+    """Real client DOM with a deterministic in-process test transport."""
+    from hermes_cli.web_routers.agent_computer_ui import COMPUTER_UI_HTML
+    import json
+    import struct
+    import zlib
+    def chunk(kind, value):
+        return struct.pack('!I', len(value)) + kind + value + struct.pack('!I', zlib.crc32(kind + value))
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!2I5B', 1, 1, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b'\0\xff\xff\xff')) + chunk(b'IEND', b'')
+    transport = r'''
+window.sent = [];
+window.control = 'AGENT_CONTROLLED';
+window.fetch = async function(path) {
+  const computer = {computer_id:'ac_test',agent_profile_id:'majed',control:window.control,lease_id:'lease',fencing_epoch:1,can_resume:window.control==='OWNER_CONTROLLED'};
+  let data = computer;
+  if(path === '/api/agent-computers') data = {computers:[computer]};
+  if(path.endsWith('/ws-ticket')) data = {ticket:'test-only'};
+  if(path.endsWith('/takeover')) { window.control='OWNER_CONTROLLED'; data={lease_id:'lease',fencing_epoch:1,takeover_token:'test-only'}; }
+  if(path.endsWith('/takeover/connect')) data={lease_id:'lease',fencing_epoch:1};
+  if(path.endsWith('/give-back')) { window.control='AGENT_CONTROLLED'; data={...computer, control:window.control,control_label:'AGENT_CONTROL'}; }
+  return {ok:true,status:200,json:async()=>data};
+};
+window.WebSocket = class {
+ constructor() {
+  this.readyState=1;
+  setTimeout(()=>{
+   this.onmessage({data:JSON.stringify({type:'hello',generation:1,control:'OWNER_CONTROL',viewport:{width:1440,height:900}})});
+   this.onmessage({data:JSON.stringify({type:'frame',generation:1,seq:1,session_id:1,mime:'image/png',data:TEST_PIXEL,location:{url:'https://fixture.example/current',origin:'https://fixture.example',https:true,scheme:'https'}})});
+  },10);
+ }
+ send(raw) {window.sent.push(JSON.parse(raw));}
+ close() {this.readyState=3; if(this.onclose)this.onclose({code:1000});}
+};
+'''.replace('TEST_PIXEL', json.dumps(base64.b64encode(png).decode()))
+    return COMPUTER_UI_HTML.replace('<script>', '<script>' + transport)
+
+
+@requires_chrome
+def test_real_takeover_client_keyboard_doubleclick_fullscreen_and_responsive(chromium_pair, local_page, tmp_path):
+    import json
+    import time
+    from gateway.agent_computer.adapter import loopback_cdp
+
+    svc, runtime, _ = chromium_pair
+    computer, _, _, _ = _boot(svc)
+    handle = svc._handles[computer.id]
+    html = tmp_path / 'client-regression.html'
+    html.write_text(_takeover_client_fixture())
+    runtime.stream_nav(handle, 'open', html.as_uri())
+
+    def evaluate(expression):
+        r = loopback_cdp(handle, 'Runtime.evaluate', {'expression': expression, 'returnByValue': True, 'awaitPromise': True, 'userGesture': True})
+        assert not r.get('exceptionDetails'), r.get('exceptionDetails')
+        return r.get('result', {}).get('value')
+    def wait_for(expression):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if evaluate(expression): return
+            time.sleep(.03)
+        raise AssertionError(expression)
+
+    wait_for("document.getElementById('computer').value === 'ac_test'")
+    evaluate("document.getElementById('take').click()")
+    wait_for('state.frameReady')
+    assert evaluate('state.agentName') == 'Majed'
+    assert evaluate("document.getElementById('origin').textContent") == 'https://fixture.example'
+    evaluate("document.getElementById('surface').focus(); window.sent=[]")
+    runtime.stream_key(handle, phase='down', key='Escape', code='Escape')
+    runtime.stream_key(handle, phase='up', key='Escape', code='Escape')
+    events = evaluate('window.sent')
+    assert any(e.get('key') == 'Escape' and e.get('phase') == 'down' for e in events)
+    # PointerEvents have detail=0 in Chromium; native double-click count must survive.
+    rect = evaluate("(()=>{const r=document.getElementById('surface').getBoundingClientRect();return {x:r.x+30,y:r.y+30}})()")
+    evaluate('window.sent=[]')
+    runtime.stream_pointer(handle, phase='click', **rect)
+    runtime.stream_pointer(handle, phase='click', click_count=2, **rect)
+    assert any(e.get('phase') == 'down' and e.get('click_count') == 2 for e in evaluate('window.sent'))
+    evaluate("document.getElementById('fullBtn').click()")
+    wait_for('document.fullscreenElement !== null')
+    evaluate("document.getElementById('fsUrlToggle').click()")
+    assert evaluate("document.getElementById('fsFullUrl').textContent") == 'https://fixture.example/current'
+    evaluate("document.getElementById('giveFs').click()")
+    wait_for("document.fullscreenElement === null && state.label === 'AGENT_CONTROL'")
+    evaluate("document.getElementById('take').click()")
+    wait_for('state.frameReady')
+    runtime.apply_viewport(handle, 406, 812)
+    wait_for("matchMedia('(max-width:720px)').matches && getComputedStyle(document.querySelector('header')).flexDirection === 'column'")
+    assert evaluate('document.documentElement.scrollWidth <= innerWidth'), evaluate("({width:innerWidth,scroll:document.documentElement.scrollWidth,overflow:[...document.querySelectorAll('*')].map(e=>({id:e.id,tag:e.tagName,x:e.getBoundingClientRect().x,right:e.getBoundingClientRect().right})).filter(r=>r.right>innerWidth+1)})")
+    assert evaluate("document.getElementById('giveOverlay').getBoundingClientRect().bottom < document.getElementById('surface').getBoundingClientRect().top")

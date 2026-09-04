@@ -80,6 +80,10 @@ def cdp_key_params(
         return params
     params["key"] = key
     params["code"] = code or (f"Key{key.upper()}" if len(key) == 1 and key.isalpha() else code)
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        params["windowsVirtualKeyCode"] = ord(key.upper())
+    if phase == "down" and key.lower() == "a" and modifiers & (_MOD_CTRL | _MOD_META):
+        params["commands"] = ["selectAll"]
     if event_type == "keyDown" and is_printable_key(key, modifiers):
         params["text"] = key
         params["type"] = "char"

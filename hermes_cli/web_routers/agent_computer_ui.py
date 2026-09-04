@@ -16,7 +16,7 @@ COMPUTER_UI_HTML = """<!DOCTYPE html>
 :root{--bg:#0e0f0d;--panel:#171915;--ink:#f4f1e8;--muted:#9a9484;--gold:#c9a227;--ok:#6fbf73;--line:#2c2e28}
 *{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,sans-serif}
 body{display:flex;flex-direction:column}
-header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:8px 12px;padding:8px 14px;border-bottom:1px solid var(--line)}
+header{display:flex;flex:0 0 auto;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:8px 12px;padding:8px 14px;border-bottom:1px solid var(--line)}
 .brand{display:flex;flex-direction:column;gap:2px;min-width:8rem;flex:0 1 auto}
 h1{font-size:1rem;margin:0}
 .status{color:var(--muted);font-size:.85rem}
@@ -34,13 +34,15 @@ main.chooser{display:grid;grid-template-columns:minmax(0,1fr) 280px;flex:1;min-h
 main.control{display:flex;flex-direction:column;flex:1;min-height:0}
 @media(max-width:800px){main.chooser{grid-template-columns:1fr}}
 @media(max-width:720px){
-  header{flex-direction:column;align-items:stretch}
-  .controlBar,.navRow,.trust{flex:1 1 100%}
+  header{flex-direction:column;align-items:stretch;flex-wrap:nowrap}
+  .controlBar{flex:0 0 auto;width:100%}
+  .navRow,.trust{flex:1 1 100%}
   header button{flex:1 1 auto}
 }
 .screen{padding:16px}
 .stage{flex:1;min-height:0;background:#000;display:flex;flex-direction:column;overflow:hidden;position:relative}
 .surfaceWrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+main,.stage,.surfaceWrap{min-width:0;max-width:100%}
 #surface{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;cursor:default;background:#111;touch-action:none;outline:none}
 #surface.debugPointer{cursor:crosshair}
 .hint{color:var(--muted);font-size:.85rem;pointer-events:none}
@@ -53,6 +55,9 @@ button:disabled{opacity:.45}
 label{display:block;color:var(--muted);font-size:.8rem;margin-top:10px}
 .banner{padding:10px 12px;border-radius:8px;background:#2a2110;color:#f3d27a}
 .err{color:#f0a0a0;font-size:.85rem;min-height:1.2em}
+.err:empty{display:none}
+#liveError{position:absolute;bottom:8px;left:8px;right:8px;background:#2a1111;padding:8px;z-index:3}
+#liveError:empty{display:none}
 .chip{background:rgba(16,17,15,.82);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .fallback{display:none;padding:12px;border-top:1px solid var(--line);background:var(--panel)}
 .fallback.open{display:block}
@@ -98,8 +103,11 @@ label{display:block;color:var(--muted);font-size:.8rem;margin-top:10px}
       <div class="chip" id="fsChip">OWNER_CONTROL</div>
       <span class="origin" id="fsOrigin">—</span>
       <button type="button" id="exitFull">Exit Full Screen</button>
+      <button type="button" id="fsUrlToggle">Show URL</button>
       <button type="button" class="ok" id="giveFs">Give Control Back</button>
+      <div class="fullUrl" id="fsFullUrl"></div>
     </div>
+    <div class="err" id="liveError" role="alert"></div>
     <div class="surfaceWrap">
       <canvas id="surface" tabindex="0" width="1440" height="900" hidden></canvas>
       <div class="hint" id="emptyShot">Starting live view…</div>
@@ -110,6 +118,7 @@ label{display:block;color:var(--muted);font-size:.8rem;margin-top:10px}
     <select id="computer"></select>
     <button type="button" id="refresh">Refresh list</button>
     <button type="button" class="primary" id="take">Take Control</button>
+    <button type="button" id="suspend">Suspend computer</button>
     <button type="button" class="ok" id="give" disabled>Give Control Back</button>
     <button type="button" id="toggleFallback">Fallback controls</button>
     <div class="fallback" id="fallback">
@@ -129,7 +138,8 @@ const state = {
   authority:"", label:"", agentName:"Agent", identityId:"",
   viewport:{width:1440,height:900}, ws:null, drawing:false,
   opening:false, retries:0, lastMoveAt:0, lastCursorAt:0, cursor:"default",
-  surfaceOpen:false, canResume:false,
+  surfaceOpen:false, canResume:false, frameReady:false, lastDrawnSeq:0,
+  lastClickAt:0, lastClickX:0, lastClickY:0, clickCount:1,
   debugPointer: new URLSearchParams(location.search).get("pointer") === "debug"
 };
 function labelOf(c){
@@ -156,7 +166,7 @@ function banner(){
   if(state.label === "RETURNING") return state.agentName + " resumed from the same place.";
   return "The agent keeps ordinary work. Take Control only at a human checkpoint.";
 }
-function showErr(msg){ $("err").textContent = msg || ""; }
+function showErr(msg){ $("err").textContent = msg || ""; $("liveError").textContent = msg || ""; }
 function ownerHasLease(){ return state.label === "OWNER_CONTROL" && state.leaseId; }
 function ownerHasControl(){ return ownerHasLease() && state.surfaceOpen; }
 function applyLocation(loc){
@@ -167,9 +177,10 @@ function applyLocation(loc){
   $("origin").textContent = origin || "—";
   $("fsOrigin").textContent = origin || "—";
   $("fullUrl").textContent = url || "";
+  $("fsFullUrl").textContent = url || "";
   $("httpsMark").textContent = https ? "HTTPS" : (loc.scheme === "fixture" ? "FIXTURE" : "HTTP");
   $("httpsMark").classList.toggle("off", !https);
-  if(url && !url.startsWith("fixture://") && document.activeElement !== $("urlBox")) $("urlBox").value = url;
+  if(document.activeElement !== $("urlBox")) $("urlBox").value = url.startsWith("fixture://") ? "" : url;
 }
 function setControlMode(on){
   state.surfaceOpen = !!on;
@@ -181,6 +192,7 @@ function setControlMode(on){
 function syncChrome(){
   const live = ownerHasControl();
   $("give").disabled = !ownerHasLease();
+  $("suspend").disabled = !!ownerHasLease();
   $("giveOverlay").disabled = !live;
   $("giveFs").disabled = !live;
   $("sendText").disabled = !live;
@@ -206,16 +218,17 @@ function syncChrome(){
   if(!live) setControlMode(false);
 }
 function applyComputer(c){
+  const id = c.computer_id || c.id || state.computerId;
+  if(id !== state.computerId){ state.leaseId = ""; state.fencingEpoch = 0; }
   state.computerId = c.computer_id || c.id || state.computerId;
   state.authority = c.control || c.control_authority || "";
   state.label = labelOf(c);
   state.fencingEpoch = c.fencing_epoch || state.fencingEpoch;
   state.canResume = !!c.can_resume;
-  if(c.lease_id) state.leaseId = c.lease_id;
-  if(c.lease && c.lease.lease_id) state.leaseId = c.lease.lease_id;
+  state.leaseId = c.lease_id || (c.lease && c.lease.lease_id) || "";
   if(c.browser_identity && c.browser_identity.id) state.identityId = c.browser_identity.id;
   const profile = (c.agent_profile_id || "").replace(/^agent:/,"");
-  state.agentName = profile ? profile.replace(/(^|[-_])(\\w)/g, (_,a,b)=> (a?" ":"")+b.toUpperCase()) : "Agent";
+  if(profile) state.agentName = profile.replace(/(^|[-_])(\\w)/g, (_,a,b)=> (a?" ":"")+b.toUpperCase());
   applyLocation(c.location || {});
   syncChrome();
 }
@@ -233,9 +246,12 @@ async function mintTicket(){
 function surfaceSize(){
   return {width: state.viewport.width || 1440, height: state.viewport.height || 900};
 }
-function drawFrame(mime, data, width, height){
+function drawFrame(msg, ws){
   const img = new Image();
   img.onload = () => {
+    if(state.ws !== ws || !ownerHasControl() || msg.generation !== state.generation) return;
+    if(msg.seq <= state.lastDrawnSeq){ sendEvent({type:"ack", session_id:msg.session_id}); return; }
+    state.lastDrawnSeq = msg.seq;
     const canvas = $("surface");
     const wasHidden = canvas.hidden;
     const vw = state.viewport.width || 1440;
@@ -244,12 +260,18 @@ function drawFrame(mime, data, width, height){
     if(canvas.height !== vh) canvas.height = vh;
     const ctx = canvas.getContext("2d");
     ctx.drawImage(img, 0, 0, vw, vh);
+    applyLocation(msg.location || {});
+    state.frameReady = true;
+    state.retries = 0;
+    showErr("");
     canvas.hidden = false;
     $("emptyShot").hidden = true;
     if(wasHidden && ownerHasControl()) canvas.focus();
     applyCursor(state.cursor);
+    sendEvent({type:"ack", session_id:msg.session_id});
   };
-  img.src = "data:"+(mime||"image/jpeg")+";base64,"+data;
+  img.onerror = () => { if(state.ws === ws) ws.close(); };
+  img.src = "data:"+(msg.mime||"image/jpeg")+";base64,"+msg.data;
 }
 function mapPoint(ev){
   const canvas = $("surface");
@@ -288,6 +310,7 @@ function applyCursor(name){
   canvas.style.cursor = next;
 }
 function sendEvent(payload){
+  if(!state.frameReady && ["pointer","key","wheel","text","cursor"].includes(payload.type)) return false;
   if(!state.ws || state.ws.readyState !== 1){
     if(payload && (payload.type === "pointer" || payload.type === "key" || payload.type === "wheel")){
       $("fullUrl").textContent = "Live view not ready — wait, then click again";
@@ -316,6 +339,7 @@ async function openStream(){
     const ws = new WebSocket(proto+"://"+location.host+"/api/agent-computers/"+state.computerId+"/stream?"+qs.toString());
     state.ws = ws;
     ws.onmessage = (ev) => {
+      if(state.ws !== ws) return;
       const msg = JSON.parse(ev.data);
       if(msg.type === "status"){
         if(!$("origin").textContent || $("origin").textContent === "—") $("origin").textContent = msg.phase === "starting" ? "Starting…" : (msg.phase || "Live");
@@ -339,7 +363,7 @@ async function openStream(){
       if(msg.type === "hello"){
         state.generation = msg.generation || 0;
         state.label = msg.control || labelOf(msg);
-        state.retries = 0;
+        state.lastDrawnSeq = 0;
         if(msg.viewport) state.viewport = msg.viewport;
         applyLocation(msg);
         syncChrome();
@@ -347,13 +371,14 @@ async function openStream(){
       }
       if(msg.type === "frame"){
         if(msg.generation && state.generation && msg.generation !== state.generation) return;
-        drawFrame(msg.mime, msg.data, msg.width, msg.height);
-        if(msg.session_id) sendEvent({type:"ack", session_id: msg.session_id});
+        drawFrame(msg, ws);
       }
     };
     ws.onclose = (ev) => {
       if(state.ws !== ws) return;
       state.ws = null;
+      state.frameReady = false;
+      showErr("Connection lost. Remote input is paused while reconnecting.");
       if(ev.code === 4401){ location.href = "/login?next=/computer"; return; }
       if(ev.code === 4403 || ev.code === 4400){
         showErr("Live view was refused (" + ev.code + "). Refresh the page.");
@@ -379,6 +404,8 @@ async function openStream(){
 function closeStream(){
   const ws = state.ws;
   state.ws = null;
+  state.frameReady = false;
+  state.drawing = false;
   if(ws){
     ws.onclose = null;
     try{ ws.close(); }catch(_e){}
@@ -389,13 +416,12 @@ async function loadList(){
   const items = data.computers || [];
   const sel = $("computer");
   const prev = sel.value || new URLSearchParams(location.search).get("computer") || "";
-  sel.innerHTML = items.map(c => {
+  sel.replaceChildren(...items.map(c => {
     const id = c.computer_id || c.id;
-    return `<option value="${id}">${(c.agent_profile_id||id)} — ${labelOf(c)}</option>`;
-  }).join("");
+    return new Option((c.agent_profile_id||id) + " — " + labelOf(c), id);
+  }));
   if(!items.length){ sel.innerHTML = "<option value=''>No computers yet</option>"; return; }
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value = prev;
-  state.computerId = sel.value;
   applyComputer(items.find(c => (c.computer_id||c.id)===sel.value) || items[0]);
 }
 async function ensureAwake(){
@@ -446,6 +472,13 @@ async function exitFullscreenSafe(){
 $("refresh").onclick = () => loadList().catch(e=>showErr(e.message));
 $("computer").onchange = () => { state.computerId=$("computer").value; state.leaseId=""; state.surfaceOpen=false; closeStream(); loadList().catch(e=>showErr(e.message)); };
 $("take").onclick = () => enterSurface().catch(e=>showErr(e.message));
+$("suspend").onclick = async () => {
+  try{
+    const data = await api("/api/agent-computers/"+state.computerId+"/sleep", {method:"POST",body:"{}"});
+    applyComputer(data);
+    $("statusLine").textContent = state.agentName + " · suspended";
+  }catch(e){showErr(e.message);}
+};
 $("give").onclick = () => giveBack().catch(e=>showErr(e.message));
 $("giveOverlay").onclick = () => giveBack().catch(e=>showErr(e.message));
 $("giveFs").onclick = () => giveBack().catch(e=>showErr(e.message));
@@ -454,6 +487,10 @@ $("exitFull").onclick = () => exitFullscreenSafe();
 $("urlToggle").onclick = () => {
   $("fullUrl").classList.toggle("open");
   $("urlToggle").textContent = $("fullUrl").classList.contains("open") ? "Hide URL" : "Show URL";
+};
+$("fsUrlToggle").onclick = () => {
+  $("fsFullUrl").classList.toggle("open");
+  $("fsUrlToggle").textContent = $("fsFullUrl").classList.contains("open") ? "Hide URL" : "Show URL";
 };
 $("backBtn").onclick = () => sendEvent({type:"nav", action:"back"});
 $("fwdBtn").onclick = () => sendEvent({type:"nav", action:"forward"});
@@ -489,9 +526,12 @@ surface.addEventListener("pointerdown", (ev) => {
   state.drawing = true;
   const p = mapPoint(ev);
   if(!p) return;
+  const now = Date.now();
+  state.clickCount = now - state.lastClickAt < 500 && Math.hypot(ev.clientX-state.lastClickX, ev.clientY-state.lastClickY) < 5 ? Math.min(state.clickCount+1, 3) : 1;
+  state.lastClickAt = now; state.lastClickX = ev.clientX; state.lastClickY = ev.clientY;
   state.lastCursorAt = Date.now();
   sendEvent(Object.assign({type:"cursor"}, p));
-  sendEvent(Object.assign({type:"pointer", phase:"down", buttons:1, click_count: ev.detail || 1}, p));
+  sendEvent(Object.assign({type:"pointer", phase:"down", buttons:1, click_count: state.clickCount}, p));
   surface.focus();
 });
 surface.addEventListener("pointermove", (ev) => {
@@ -517,7 +557,7 @@ surface.addEventListener("pointerup", (ev) => {
   state.drawing = false;
   const p = mapPoint(ev);
   if(!p) return;
-  sendEvent(Object.assign({type:"pointer", phase:"up", buttons:0, click_count: ev.detail || 1}, p));
+  sendEvent(Object.assign({type:"pointer", phase:"up", buttons:0, click_count: state.clickCount}, p));
 });
 surface.addEventListener("wheel", (ev) => {
   if(!ownerHasControl()) return;
@@ -529,19 +569,23 @@ surface.addEventListener("wheel", (ev) => {
 surface.addEventListener("keydown", (ev) => {
   if(!ownerHasControl()) return;
   if(ev.target !== surface) return;
-  if(ev.key === "Escape") return;
-  if(ev.metaKey || (ev.ctrlKey && "lrtwn".includes(ev.key.toLowerCase()))) return;
+  if((ev.metaKey || ev.ctrlKey) && "lrtwnv".includes(ev.key.toLowerCase())) return;
   ev.preventDefault();
-  const mods = (ev.altKey?1:0) | (ev.ctrlKey?2:0) | (ev.metaKey?4:0) | (ev.shiftKey?8:0);
+  const mods = (ev.altKey?1:0) | ((ev.ctrlKey || ev.metaKey)?2:0) | (ev.shiftKey?8:0);
   sendEvent({type:"key", phase:"down", key: ev.key, code: ev.code, modifiers: mods});
 });
 surface.addEventListener("keyup", (ev) => {
   if(!ownerHasControl() || ev.target !== surface) return;
-  if(ev.key === "Escape") return;
-  if(ev.metaKey || (ev.ctrlKey && "lrtwn".includes(ev.key.toLowerCase()))) return;
+  if((ev.metaKey || ev.ctrlKey) && "lrtwnv".includes(ev.key.toLowerCase())) return;
   ev.preventDefault();
-  const mods = (ev.altKey?1:0) | (ev.ctrlKey?2:0) | (ev.metaKey?4:0) | (ev.shiftKey?8:0);
+  const mods = (ev.altKey?1:0) | ((ev.ctrlKey || ev.metaKey)?2:0) | (ev.shiftKey?8:0);
   sendEvent({type:"key", phase:"up", key: ev.key, code: ev.code, modifiers: mods});
+});
+surface.addEventListener("paste", (ev) => {
+  if(!ownerHasControl()) return;
+  ev.preventDefault();
+  const text = ev.clipboardData && ev.clipboardData.getData("text/plain");
+  if(text) sendEvent({type:"text", text});
 });
 $("sendText").onclick = async () => {
   const text = $("typeBox").value;

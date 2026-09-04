@@ -71,7 +71,14 @@ def build_service(
         else:
             runtime = InMemoryRuntime()
     store = AgentComputerStore(root / "state.db")
-    return AgentComputerService(store, runtime, data_root=root)
+    try:
+        from hermes_cli.config import load_config
+
+        section = (load_config() or {}).get("agent_computer") or {}
+        max_active = int(section.get("max_active_computers", 2))
+    except (TypeError, ValueError):
+        max_active = 2
+    return AgentComputerService(store, runtime, data_root=root, max_active_computers=max_active)
 
 
 def get_service() -> AgentComputerService:

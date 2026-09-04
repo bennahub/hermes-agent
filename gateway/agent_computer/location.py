@@ -26,7 +26,15 @@ def public_location(url: str, title: str = "") -> dict[str, object]:
         }
     if raw.startswith(("http://", "https://")):
         parsed = urlparse(raw)
-        host = parsed.netloc
+        host = parsed.hostname or ""
+        if ":" in host:
+            host = "[" + host + "]"
+        try:
+            if parsed.port is not None:
+                host += ":" + str(parsed.port)
+        except ValueError:
+            return {"url": "", "origin": "", "https": False, "title": "", "scheme": ""}
+        raw = parsed._replace(netloc=host).geturl()
         origin = f"{parsed.scheme}://{host}" if host else parsed.scheme + "://"
         return {
             "url": raw,

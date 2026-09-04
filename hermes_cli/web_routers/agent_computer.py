@@ -277,12 +277,25 @@ async def computer_stream(ws: WebSocket, computer_id: str):
     cdp_task = None
 
     async def _pump() -> None:
-        while live and not live.closed:
-            frame = live.pop_frame()
-            if frame:
-                await ws.send_json(live.public_frame(frame))
-            else:
-                await asyncio.sleep(0.02)
+        checked_at = 0.0
+        try:
+            while live and not live.closed:
+                now = asyncio.get_running_loop().time()
+                if now - checked_at >= 0.5:
+                    await asyncio.to_thread(
+                        contract.stream_input, computer_id, principal,
+                        lease_id=lease_id, fencing_epoch=fencing_epoch,
+                        generation=generation, event={"type": "ping"},
+                    )
+                    checked_at = now
+                frame = live.pop_frame()
+                if frame:
+                    await ws.send_json(live.public_frame(frame))
+                else:
+                    await asyncio.sleep(0.02)
+            await ws.close(code=4409)
+        except AgentComputerError:
+            await ws.close(code=4409)
 
     try:
         await ws.send_json(hello)
@@ -292,7 +305,7 @@ async def computer_stream(ws: WebSocket, computer_id: str):
         try:
             handle = await asyncio.to_thread(contract.stream_runtime_handle, computer_id)
         except Exception:
-            log.warning("stream runtime attach failed computer=%s", computer_id, exc_info=True)
+            log.warning("stream runtime attach failed computer=%s", computer_id)
             handle = None
         has_cdp = bool(handle is not None and getattr(handle, "cdp_loopback", None))
         log.info("stream runtime computer=%s has_cdp=%s", computer_id, has_cdp)
@@ -301,11 +314,12 @@ async def computer_stream(ws: WebSocket, computer_id: str):
                 try:
                     await run_chromium_screencast(live, handle)
                 except Exception:
-                    log.warning("screencast ended computer=%s", computer_id, exc_info=True)
+                    log.warning("screencast ended computer=%s", computer_id)
                     try:
                         await ws.send_json(
                             {"type": "error", "code": 4500, "reason": "screencast", "retry": True}
                         )
+                        await ws.close(code=4500)
                     except Exception:
                         pass
 
@@ -314,7 +328,8 @@ async def computer_stream(ws: WebSocket, computer_id: str):
             emit_memory_frame(live, str(hello.get("url") or ""))
         while True:
             message = await ws.receive_json()
-            result = contract.stream_input(
+            result = await asyncio.to_thread(
+                contract.stream_input,
                 computer_id,
                 principal,
                 lease_id=lease_id,
@@ -332,6 +347,7 @@ async def computer_stream(ws: WebSocket, computer_id: str):
                         "url": result.get("url") or "",
                         "title": result.get("title") or "",
                         "https": bool(result.get("https")),
+                        "scheme": result.get("scheme") or "",
                     }
                 )
     except WebSocketDisconnect:
@@ -341,12 +357,15 @@ async def computer_stream(ws: WebSocket, computer_id: str):
             await ws.close(code=4409)
         except Exception:
             pass
+    except (ValueError, TypeError):
+        await _reject(4400, "bad_event")
     finally:
         if pump_task:
             pump_task.cancel()
         if cdp_task:
             cdp_task.cancel()
-        contract.close_stream(computer_id, generation)
+        await asyncio.gather(*(task for task in (pump_task, cdp_task) if task), return_exceptions=True)
+        await asyncio.to_thread(contract.close_stream, computer_id, generation)
 
 
 @router.post("/api/agent-computers/{computer_id}/owner-disconnect")

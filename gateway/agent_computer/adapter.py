@@ -117,6 +117,7 @@ class RuntimeHandle:
     screenshot_height: int = 0
     viewport_width: int = 0
     viewport_height: int = 0
+    target_id: str | None = None
 
 
 class ComputerRuntime(Protocol):
@@ -1019,10 +1020,12 @@ class HermesChromiumRuntime:
     def stream_nav(self, handle: RuntimeHandle, action: str, url: str = "") -> dict[str, str]:
         import time
 
-        if action == "back":
-            loopback_cdp(handle, "Page.goBack", {})
-        elif action == "forward":
-            loopback_cdp(handle, "Page.goForward", {})
+        if action in ("back", "forward"):
+            history = loopback_cdp(handle, "Page.getNavigationHistory", {})
+            entries = history.get("entries") or []
+            index = int(history.get("currentIndex", -1)) + (-1 if action == "back" else 1)
+            if 0 <= index < len(entries):
+                loopback_cdp(handle, "Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]})
         elif action == "reload":
             loopback_cdp(handle, "Page.reload", {})
         elif action == "open":
@@ -1090,6 +1093,19 @@ class HermesChromiumRuntime:
         pid = handle.process_id or (proc.pid if proc is not None else None)
         if not pid:
             return
+        if proc is not None and proc.poll() is not None:
+            return
+        # Persisted PIDs can be reused after a service/host restart. A stale
+        # marker never authorizes terminating an unrelated process tree.
+        if proc is None:
+            try:
+                import psutil
+
+                args = psutil.Process(pid).cmdline()
+                if f"--user-data-dir={handle.user_data_dir}" not in args:
+                    return
+            except (psutil.Error, OSError):
+                return
         import os
         import signal
         import time
@@ -1221,9 +1237,11 @@ def _loopback_ws(handle: RuntimeHandle) -> tuple[str, str | None]:
         with urllib.request.urlopen(f"{base}/json/list", timeout=5) as resp:
             pages = json.load(resp)
         if isinstance(pages, list):
-            page = pick_page_target(pages)
+            page = next((p for p in pages if isinstance(p, dict) and p.get("type") == "page" and p.get("id") == handle.target_id), None)
+            page = page or pick_page_target(pages)
             if page:
                 target_id = page.get("id")
+                handle.target_id = target_id
     except Exception:
         target_id = None
     return str(ws_url), target_id

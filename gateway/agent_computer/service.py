@@ -65,6 +65,7 @@ from .models import (
     project_control,
 )
 from .store import AgentComputerStore
+from .locking import ComputerOperationLock
 
 BACKEND_NAME = "hermes_chromium"
 OWNER_TAKEOVER_TTL_S = 30 * 60
@@ -91,13 +92,15 @@ class AgentComputerService:
         data_root: str | Path | None = None,
         clock: Callable[[], datetime] | None = None,
         takeover_ttl_s: int = OWNER_TAKEOVER_TTL_S,
+        max_active_computers: int = 2,
     ):
         self.store = store
         self.runtime = runtime or InMemoryRuntime()
         self.data_root = Path(data_root or ".")
         self.clock = clock or _now
         self.takeover_ttl_s = takeover_ttl_s
-        self._lock = threading.RLock()
+        self.max_active_computers = max(1, int(max_active_computers))
+        self._lock = ComputerOperationLock(self.store.path.with_suffix(".control.lock"))
         self._handles: dict[str, RuntimeHandle] = {}
         self._owner_transports: dict[str, int] = {}
 
@@ -190,11 +193,15 @@ class AgentComputerService:
         with self._lock:
             computer = self.get_computer(computer_id)
             self.authorize_read(computer, principal)
+            if computer.control_authority == ControlAuthority.OWNER_CONTROLLED and not is_owner_principal(principal):
+                raise ConflictError("owner currently controls this computer")
             identity = self.get_identity(identity_id)
             if identity.revoked:
                 raise RevokedError("browser identity revoked")
             if not identity.allows(computer.agent_profile_id):
                 raise ForbiddenError("profile is not authorized for this BrowserIdentity")
+            if computer.active_browser_identity_id == identity.id:
+                return computer
             locked = self.store.try_lock_identity(identity.id, computer.id, principal)
             if locked is None:
                 identity = self.get_identity(identity_id)
@@ -206,6 +213,10 @@ class AgentComputerService:
                     },
                 )
             identity = locked
+            if computer.active_browser_identity_id:
+                computer = self.detach_identity(computer.id, principal)
+            elif self._handles.get(computer.id) or self._attach_handle(computer):
+                computer = self._retire_identity_runtime(computer)
             computer.active_browser_identity_id = identity.id
             computer.updated_at = _iso(self.clock())
             self.store.upsert_computer(computer)
@@ -221,8 +232,11 @@ class AgentComputerService:
         with self._lock:
             computer = self.get_computer(computer_id)
             self.authorize_read(computer, principal)
+            if computer.control_authority == ControlAuthority.OWNER_CONTROLLED and not is_owner_principal(principal):
+                raise ConflictError("owner currently controls this computer")
             iid = computer.active_browser_identity_id
             if iid:
+                computer = self._retire_identity_runtime(computer)
                 identity = self.get_identity(iid)
                 if identity.lock_computer_id == computer.id:
                     identity.lock_computer_id = None
@@ -234,19 +248,33 @@ class AgentComputerService:
                 self._audit(computer.id, "browser_identity_detach", principal, {"identity_id": iid})
             return computer
 
+    def _retire_identity_runtime(self, computer: AgentComputer) -> AgentComputer:
+        """Stop using the old profile before its exclusive mount is released."""
+        computer = self.sleep(computer.id, OWNER_PRINCIPAL)
+        self.store.revoke_leases(computer.id)
+        self.store.expire_tokens_for_computer(computer.id)
+        self._drop_live_stream(computer.id)
+        computer.fencing_epoch += 1
+        computer.control_authority = ControlAuthority.AGENT_CONTROLLED
+        computer.resume_observe_required = True
+        computer.workspace_url = ""
+        computer.workspace_title = ""
+        self.store.upsert_computer(computer)
+        return computer
+
     def revoke_identity(self, identity_id: str, principal: str) -> BrowserIdentity:
         self.authorize_owner(principal)
-        identity = self.get_identity(identity_id)
-        identity.revoked = True
-        identity.lock_computer_id = None
-        identity.lock_holder = None
-        self.store.upsert_identity(identity)
-        for computer in self.store.list_computers():
-            if computer.active_browser_identity_id == identity_id:
-                computer.active_browser_identity_id = None
-                self.store.upsert_computer(computer)
-        self._audit(None, "identity_revoked", principal, {"identity_id": identity_id})
-        return identity
+        with self._lock:
+            for computer in self.store.list_computers():
+                if computer.active_browser_identity_id == identity_id:
+                    self.detach_identity(computer.id, principal)
+            identity = self.get_identity(identity_id)
+            identity.revoked = True
+            identity.lock_computer_id = None
+            identity.lock_holder = None
+            self.store.upsert_identity(identity)
+            self._audit(None, "identity_revoked", principal, {"identity_id": identity_id})
+            return identity
 
     # ── lifecycle ────────────────────────────────────────────────────
     def wake(self, computer_id: str, principal: str) -> tuple[AgentComputer, ControlLease]:
@@ -260,6 +288,9 @@ class AgentComputerService:
             ):
                 raise ConflictError("owner currently controls this computer")
             existing = self._handles.get(computer.id)
+            if existing and existing.identity_id != computer.active_browser_identity_id:
+                self._handles.pop(computer.id, None)
+                existing = None
             if existing and not self._runtime_alive(existing):
                 try:
                     self.runtime.sleep(existing)
@@ -272,7 +303,6 @@ class AgentComputerService:
             if (
                 existing
                 and self._runtime_alive(existing)
-                and computer.lifecycle in (Lifecycle.READY, Lifecycle.BUSY, Lifecycle.WAKING)
             ):
                 lease = self.store.active_lease_for_computer(computer.id)
                 if lease is None:
@@ -285,6 +315,25 @@ class AgentComputerService:
                 computer.updated_at = _iso(self.clock())
                 self.store.upsert_computer(computer)
                 return computer, lease
+            active = []
+            for other in self.store.list_computers():
+                if other.id == computer.id:
+                    continue
+                handle = self._handles.get(other.id)
+                if handle is not None and not self._runtime_alive(handle):
+                    self._handles.pop(other.id, None)
+                    handle = None
+                handle = handle or self._attach_handle(other)
+                if handle is not None and self._runtime_alive(handle):
+                    active.append(other.agent_profile_id)
+                elif other.lifecycle in (Lifecycle.READY, Lifecycle.BUSY, Lifecycle.WAKING):
+                    other.lifecycle = Lifecycle.SLEEPING
+                    self.store.upsert_computer(other)
+            if len(active) >= self.max_active_computers:
+                raise ConflictError(
+                    "Active computer limit reached. Suspend an unused computer before waking another.",
+                    details={"max_active_computers": self.max_active_computers, "active_profiles": active},
+                )
             computer.lifecycle = Lifecycle.WAKING
             self.store.upsert_computer(computer)
             identity = None
@@ -315,8 +364,16 @@ class AgentComputerService:
         with self._lock:
             computer = self.get_computer(computer_id)
             self.authorize_read(computer, principal)
-            handle = self._handles.pop(computer.id, None)
+            if computer.control_authority == ControlAuthority.OWNER_CONTROLLED and not is_owner_principal(principal):
+                raise ConflictError("owner currently controls this computer")
+            handle = self._handles.get(computer.id) or self._attach_handle(computer)
+            self._handles.pop(computer.id, None)
             if handle:
+                current_location = getattr(self.runtime, "current_location", None)
+                if callable(current_location):
+                    loc = current_location(handle)
+                    self._remember_workspace(computer, str(loc.get("url") or ""), str(loc.get("title") or ""))
+                self._drop_live_stream(computer.id)
                 self.runtime.sleep(handle)
             computer.lifecycle = Lifecycle.SLEEPING
             computer.updated_at = _iso(self.clock())
@@ -356,6 +413,9 @@ class AgentComputerService:
 
     def _handle(self, computer: AgentComputer) -> RuntimeHandle:
         handle = self._handles.get(computer.id)
+        if handle and handle.identity_id != computer.active_browser_identity_id:
+            self._handles.pop(computer.id, None)
+            handle = None
         if handle and self._runtime_alive(handle):
             return handle
         if handle:
@@ -368,12 +428,9 @@ class AgentComputerService:
         if recovered is not None:
             self._audit(computer.id, "recovery", "system", {"reason": "reattach_runtime"})
             return recovered
-        identity = None
-        if computer.active_browser_identity_id:
-            identity = self.get_identity(computer.active_browser_identity_id)
-        handle = self.runtime.wake(computer, identity)
-        self._handles[computer.id] = handle
-        self._restore_workspace(computer, handle)
+        # Recovery uses the same serialized resource admission as explicit wake.
+        self.wake(computer.id, OWNER_PRINCIPAL)
+        handle = self._handles[computer.id]
         self._audit(computer.id, "recovery", "system", {"reason": "recreate_runtime"})
         return handle
 
@@ -391,8 +448,7 @@ class AgentComputerService:
         if not saved or page_needs_restore(saved):
             return
         computer.workspace_url = saved
-        if title:
-            computer.workspace_title = title
+        computer.workspace_title = title
 
     # ── observe / act ────────────────────────────────────────────────
     def observe(self, computer_id: str, principal: str, *, lease_id: str, fencing_epoch: int) -> Observation:
@@ -737,8 +793,6 @@ class AgentComputerService:
             kind = normalized.get("kind")
             if kind == "ack":
                 session.ack(int(normalized.get("session_id") or 0))
-                if session._dispatch:
-                    session._dispatch(normalized)
                 return {"ok": True, "kind": "ack"}
             if kind == "ping":
                 return {"ok": True, "kind": "ping"}
