@@ -160,3 +160,45 @@ temporary databases; no production job was forced solely to create evidence.
 The test lane issued no production restart. Its first test unit started at
 23:30:38 UTC, after independently observed systemd restarts of gateway/serve at
 23:28:25/23:28:32. The external restart actor has not been established.
+
+
+## Final integrated deployed-source verification
+
+After independent external review of the Linux C0 repair, the supervisor
+selectively deployed its single adapter delta at 23:51:01 UTC. The final
+protected test bundle combined core product `c3f4136`, core test correction
+`fc81145`, and C0 product/tests `5936efe`. The canonical Linux runner passed
+**486 tests, zero failures, zero skips, 26 files** in 26.3 seconds. All six real
+Chromium cases and all three source-identity, read-only mount and installed
+browser prerequisites passed. All 24 deployed product hashes matched before
+collection and after the run. No production service was restarted by this lane;
+all temporary Chromium processes exited and the subsequent inventory was zero.
+
+Final read-only checks confirm all 15 retention configurations remain 30 days,
+all 13 managed mission blocks are already current, canonical Bot Chat IDs and
+observation-job identities/enabled states remain unchanged, surviving pilot
+work states remain unchanged, and Nasser remains deleted. Native retention
+boundaries are still intentionally latent until a real agent-producing cron
+execution. The runtime code, configuration, and managed SOUL deployment receipts
+are separate; no claim relies only on the live Git HEAD.
+
+Abu Saud's active `sessions.message_count` changed from 327 at baseline to 427
+at an earlier postcheck and 29 at the final check. This metadata tracks active
+context, so a monotonic-count assertion alone is invalid across native
+compaction. Exact profile log events at 23:44:23 UTC record **425 -> 28** messages
+with `commit_status=committed` and `split_status=in_place_committed`; one later
+message accounts for 29 active rows. The same canonical ID currently retains
+**3,408 stored rows: 2,743 compacted, 636 other inactive, and 29 active**. A
+consistent private SQLite backup was taken from a read-only connection at
+`/run/astra-program-final-5936efe-fc81145/abu-saud-private-preservation/state.db`
+(directory 0700, file 0600, `quick_check=ok`). No restore, deletion or metadata
+rewrite occurred. The original snapshot did not hash all historical rows, so
+byte-for-byte equality of the earlier full transcript is not claimed; the
+committed native compaction and retained rows explain the observed count drop.
+
+Final evidence in the supervisor workspace: `program-vps-final-protected-tests.log`,
+`core-c5-final-deployment-state.json`, `core-c5-final-preservation-summary.json`,
+`mission-final-idempotent-plan.json`, and the count-only Abu Saud compaction and
+private-backup receipts. The actual-source suite verifies the repaired native
+contracts; it does not claim a new outward-message pilot or a 30-day production
+retention deletion.
