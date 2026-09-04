@@ -1,418 +1,206 @@
 ---
 name: telephony
-description: Provision Twilio numbers, SMS/MMS, and AI outbound calls.
-version: 1.0.0
+description: Call and text via Twilio, Wave, Bland, or Vapi.
+version: 1.1.0
 author: Nous Research
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
-    tags: [telephony, phone, sms, mms, voice, twilio, bland.ai, vapi, calling, texting]
+    tags: [telephony, phone, sms, mms, voice, twilio, wave, bland.ai, vapi]
     related_skills: [maps, google-workspace, agentmail]
     category: productivity
 ---
 
-# Telephony — Numbers, Calls, and Texts without Core Tool Changes
+# Telephony Skill
 
-This optional skill gives Hermes practical phone capabilities while keeping telephony out of the core tool list.
+Use existing provider APIs for owned numbers, texts, direct calls and AI calls.
+The helper is a CLI, not a new Hermes tool or inbound voice gateway. Wave supports
+Saudi call initiation; a conversational flow must also be enabled by the provider.
 
-It ships with a helper script, `scripts/telephony.py`, that can:
-- save provider credentials into `${HERMES_HOME:-~/.hermes}/.env`
-- search for and buy a Twilio phone number
-- remember that owned number for later sessions
-- send SMS / MMS from the owned number
-- poll inbound SMS for that number with no webhook server required
-- make direct Twilio calls using TwiML `<Say>` or `<Play>`
-- import the owned Twilio number into Vapi
-- place outbound AI calls through Bland.ai or Vapi
+## When to Use
 
-## What this solves
+- Find and manage an agent-owned number where the provider offers inventory.
+- Send an authorized SMS/MMS or check incoming Twilio texts.
+- Deliver a voice message or run an authorized conversational AI call.
+- Inspect Saudi +966 setup and prepare a Wave call without dialing.
 
-This skill is meant to cover the practical phone tasks users actually want:
-- outbound calls
-- texting
-- owning a reusable agent number
-- checking messages that arrive to that number later
-- preserving that number and related IDs between sessions
-- future-friendly telephony identity for inbound SMS polling and other automations
+## Prerequisites
 
-It does **not** turn Hermes into a real-time inbound phone gateway. Inbound SMS is handled by polling the Twilio REST API. That is enough for many workflows, including notifications and some one-time-code retrieval, without adding core webhook infrastructure.
+Use the intended profile's `HERMES_HOME`; personal work belongs to Hamad. Locate
+`scripts/telephony.py` in the installed skill using `search_files` and invoke it
+through `terminal`. Hermes' Python runtime is sufficient; the HTTP helper uses
+stdlib and optionally reads Hermes' existing YAML configuration.
 
-## Safety rules — mandatory
+Install with `hermes skills install official/productivity/telephony`. When testing
+an unmerged local candidate, install that reviewed candidate; the official hub
+may still contain the earlier version.
 
-1. Always confirm before placing a call or sending a text.
-2. Never dial emergency numbers.
-3. Never use telephony for harassment, spam, impersonation, or anything illegal.
-4. Treat third-party phone numbers as sensitive operational data:
-   - do not save them to Hermes memory
-   - do not include them in skill docs, summaries, or follow-up notes unless the user explicitly wants that
-5. It is fine to persist the **agent-owned Twilio number** because that is part of the user's configuration.
-6. VoIP numbers are **not guaranteed** to work for all third-party 2FA flows. Use with caution and set user expectations clearly.
+Provider credentials are read from that process environment, its profile `.env`,
+then legacy config entries. New credential files are written atomically with
+private permissions. Do not paste secrets into chat, tool arguments or logs.
+Use an Owner terminal or an existing approved secret injection path for setup.
 
-## Decision tree — which service to use?
+| Provider | Required setup |
+|---|---|
+| Twilio | Account SID, Auth Token, owned number for outbound/inbox |
+| Bland | API key; provider coverage suitable for the destination |
+| Vapi | API key, imported/owned phone number ID, assistant settings |
+| Wave | Production eligibility, key scopes, owned Saudi caller ID and account call flow |
 
-Use this logic instead of hardcoded provider routing:
+Persistent credentials and owned identifiers use `<HERMES_HOME>/.env`.
+`<HERMES_HOME>/telephony_state.json` stores owned-number IDs and inbox checkpoints.
+New behavioral settings belong in `config.yaml`, not new environment variables.
 
-### 1) "I want Hermes to own a real phone number"
-Use **Twilio**.
+## How to Run
 
-Why:
-- easiest path to buying and keeping a number
-- best SMS / MMS support
-- simplest inbound SMS polling story
-- cleanest future path to inbound webhooks or call handling
+Replace `SCRIPT` below with the located installed helper path. Begin with
+`python "$SCRIPT" diagnose`. This is a configuration report, not proof of a
+working account, caller ID ownership, voice quality or permission to make calls.
 
-Use cases:
-- receive texts later
-- send deployment alerts / cron notifications
-- maintain a reusable phone identity for the agent
-- experiment with phone-based auth flows later
-
-### 2) "I only need the easiest outbound AI phone call right now"
-Use **Bland.ai**.
-
-Why:
-- quickest setup
-- one API key
-- no need to first buy/import a number yourself
-
-Tradeoff:
-- less flexible
-- voice quality is decent, but not the best
-
-### 3) "I want the best conversational AI voice quality"
-Use **Twilio + Vapi**.
-
-Why:
-- Twilio gives you the owned number
-- Vapi gives you better conversational AI call quality and more voice/model flexibility
-
-Recommended flow:
-1. Buy/save a Twilio number
-2. Import it into Vapi
-3. Save the returned `VAPI_PHONE_NUMBER_ID`
-4. Use `ai-call --provider vapi`
-
-### 4) "I want to call with a custom prerecorded voice message"
-Use **Twilio direct call** with a public audio URL.
-
-Why:
-- easiest way to play a custom MP3
-- pairs well with Hermes `text_to_speech` plus a public file host or tunnel
-
-## Files and persistent state
-
-The skill persists telephony state in two places:
-
-### `${HERMES_HOME:-~/.hermes}/.env`
-Used for long-lived provider credentials and owned-number IDs, for example:
-- `TWILIO_ACCOUNT_SID`
-- `TWILIO_AUTH_TOKEN`
-- `TWILIO_PHONE_NUMBER`
-- `TWILIO_PHONE_NUMBER_SID`
-- `BLAND_API_KEY`
-- `VAPI_API_KEY`
-- `VAPI_PHONE_NUMBER_ID`
-- `PHONE_PROVIDER` (AI call provider: bland or vapi)
-
-### `~/.hermes/telephony_state.json`
-Used for skill-only state that should survive across sessions, for example:
-- remembered default Twilio number / SID
-- remembered Vapi phone number ID
-- last inbound message SID/date for inbox polling checkpoints
-
-This means:
-- the next time the skill is loaded, `diagnose` can tell you what number is already configured
-- `twilio-inbox --since-last --mark-seen` can continue from the previous checkpoint
-
-## Locate the helper script
-
-After installing this skill, locate the script like this:
+For Wave, the Owner can run this in their terminal; the API key is prompted
+without echo and is absent from the command line:
 
 ```bash
-SCRIPT="$(find ~/.hermes/skills -path '*/telephony/scripts/telephony.py' -print -quit)"
+python "$SCRIPT" save-wave --from-number '<owned +966 number>'
 ```
 
-If `SCRIPT` is empty, the skill is not installed yet.
+An optional positional API key remains for compatibility with existing private
+setup automation. Do not put a real key in an agent-generated command. Existing
+`save-twilio`, `save-bland` and `save-vapi` commands also remain compatible; use
+Owner-side setup or secure injection for their credential arguments.
 
-## Install
+## Quick Reference
 
-This is an official optional skill, so install it from the Skills Hub:
+| Need | Command / provider |
+|---|---|
+| Saudi +966 call preparation | `wave-health`, `diagnose`, `wave-call` dry-run |
+| Saudi production call initiation | `wave-call --confirm`, with verified account flow |
+| Saudi call status | `wave-logs` (read-only, compact masked records) |
+| Owned number where inventory exists | Twilio `twilio-search`, `twilio-buy`, `twilio-owned` |
+| Set owned default | `twilio-set-default <E.164-or-PN-SID> --save-env` |
+| Send text or media | `twilio-send-sms <to> <body> [--media-url <url>]` |
+| Poll inbound texts | `twilio-inbox --since-last --mark-seen` |
+| One-way TTS/audio | `twilio-call <to> --message <text>` or `--audio-url <url>` |
+| Telephone IVR | Twilio direct call `--send-digits` (w = wait) |
+| AI call | `ai-call <to> <task> --provider bland` or `--provider vapi` |
+| Check AI outcome | `ai-status <call-id> --provider bland|vapi` |
+| Vapi owned-number import | `vapi-import-twilio --save-env` |
+
+Choose a provider from current destination and inventory evidence. Twilio's
+Saudi pricing supports outbound termination but does not establish a local
++966 number for this program; its SA SMS guidelines say two-way SMS is unavailable.
+Bland and Vapi need separate coverage/account checks, and cannot be assumed to
+supply a Saudi caller identity.
+
+Wave is the provisional Saudi option because its published API directly models
+Saudi numbers and call initiation. Unifonic and CEQUENS are credible alternatives
+if Wave cannot enable the required account; neither has a client in this helper.
+Do not create another telephony backend to work around an account gate.
+
+## Procedure
+
+### 1. Resolve authorization and purpose
+
+Use the user's existing instruction when it clearly authorizes this recipient
+and call/message purpose. Ask only for a missing consequential authorization;
+do not reconfirm an already authorized ordinary action. Number purchases,
+subscriptions, account terms and unapproved charges remain Owner boundaries.
+Never dial emergency numbers or use calling for harassment, spam or impersonation.
+
+Record the call goal and stop condition before dialing. A restaurant inquiry and
+a reservation commitment are different actions. Do not use a research instruction
+as permission to book, pay or accept cancellation charges.
+
+### 2. Verify current configuration
+
+Run `diagnose`. Select the correct profile and inspect only presence/status,
+not credential contents. A key prefix is not account validation. Do not infer
+that a missing number can be supplied by another profile or an arbitrary caller ID.
+
+For Wave, confirm with the provider before provisioning/payment:
+
+- Whether production is available for this account and its KYC/business requirements.
+- The exact +966 number type, inbound/outbound support and caller ID entitlement.
+- Monthly number rental, inbound/outbound minutes, AI/recording fees, channel limits,
+  taxes, minimum spend and cancellation terms.
+- The enabled voice flow and whether a conversational AI outcome is retrievable.
+
+Current Wave docs disagree about production availability and complete webhook
+lifecycle support. Do not turn those claims into readiness. Sandbox callbacks
+can ring real phones; a sandbox key is not permission to test-call someone.
+
+### 3. Prepare using a dry-run or read-only operation
+
+Wave commands:
 
 ```bash
-hermes skills search telephony
-hermes skills install official/productivity/telephony
+python "$SCRIPT" wave-health
+python "$SCRIPT" wave-call '<Saudi destination>'
+python "$SCRIPT" wave-logs --limit 20
 ```
 
-## Provider setup
-
-### Twilio — owned number, SMS/MMS, direct calls, inbound SMS polling
-
-Sign up at:
-- https://www.twilio.com/try-twilio
-
-Then save credentials into Hermes:
-
-```bash
-python "$SCRIPT" save-twilio ACXXXXXXXXXXXXXXXXXXXXXXXXXXXX your_auth_token_here
-```
-
-Search for available numbers:
-
-```bash
-python "$SCRIPT" twilio-search --country US --area-code 702 --limit 5
-```
-
-Buy and remember a number:
-
-```bash
-python "$SCRIPT" twilio-buy "+17025551234" --save-env
-```
-
-List owned numbers:
-
-```bash
-python "$SCRIPT" twilio-owned
-```
-
-Set one of them as the default later:
-
-```bash
-python "$SCRIPT" twilio-set-default "+17025551234" --save-env
-# or
-python "$SCRIPT" twilio-set-default PNXXXXXXXXXXXXXXXXXXXXXXXXXXXX --save-env
-```
-
-### Bland.ai — easiest outbound AI calling
-
-Sign up at:
-- https://app.bland.ai
-
-Save config:
-
-```bash
-python "$SCRIPT" save-bland your_bland_api_key --voice mason
-```
-
-### Vapi — better conversational voice quality
-
-Sign up at:
-- https://dashboard.vapi.ai
-
-Save the API key first:
-
-```bash
-python "$SCRIPT" save-vapi your_vapi_api_key
-```
-
-Import your owned Twilio number into Vapi and persist the returned phone number ID:
-
-```bash
-python "$SCRIPT" vapi-import-twilio --save-env
-```
-
-If you already know the Vapi phone number ID, save it directly:
-
-```bash
-python "$SCRIPT" save-vapi your_vapi_api_key --phone-number-id vapi_phone_number_id_here
-```
-
-## Diagnose current state
-
-At any time, inspect what the skill already knows:
-
-```bash
-python "$SCRIPT" diagnose
-```
-
-Use this first when resuming work in a later session.
-
-## Common workflows
-
-### A. Buy an agent number and keep using it later
-
-1. Save Twilio credentials:
-```bash
-python "$SCRIPT" save-twilio AC... auth_token_here
-```
-
-2. Search for a number:
-```bash
-python "$SCRIPT" twilio-search --country US --area-code 702 --limit 10
-```
-
-3. Buy it and save it into `${HERMES_HOME:-~/.hermes}/.env` + state:
-```bash
-python "$SCRIPT" twilio-buy "+17025551234" --save-env
-```
-
-4. Next session, run:
-```bash
-python "$SCRIPT" diagnose
-```
-This shows the remembered default number and inbox checkpoint state.
-
-### B. Send a text from the agent number
-
-```bash
-python "$SCRIPT" twilio-send-sms "+15551230000" "Your deployment completed successfully."
-```
-
-With media:
-
-```bash
-python "$SCRIPT" twilio-send-sms "+15551230000" "Here is the chart." --media-url "https://example.com/chart.png"
-```
-
-### C. Check inbound texts later with no webhook server
-
-Poll the inbox for the default Twilio number:
-
-```bash
-python "$SCRIPT" twilio-inbox --limit 20
-```
-
-Only show messages that arrived after the last checkpoint, and advance the checkpoint when you're done reading:
-
-```bash
-python "$SCRIPT" twilio-inbox --since-last --mark-seen
-```
-
-This is the main answer to “how do I access messages the number receives next time the skill is loaded?”
-
-### D. Make a direct Twilio call with built-in TTS
-
-```bash
-python "$SCRIPT" twilio-call "+15551230000" --message "Hello! This is Hermes calling with your status update." --voice Polly.Joanna
-```
-
-### E. Call with a prerecorded / custom voice message
-
-This is the main path for reusing Hermes's existing `text_to_speech` support.
-
-Use this when:
-- you want the call to use Hermes's configured TTS voice rather than Twilio `<Say>`
-- you want a one-way voice delivery (briefing, alert, joke, reminder, status update)
-- you do **not** need a live conversational phone call
-
-Generate or host audio separately, then:
-
-```bash
-python "$SCRIPT" twilio-call "+155****0000" --audio-url "https://example.com/briefing.mp3"
-```
-
-Recommended Hermes TTS -> Twilio Play workflow:
-
-1. Generate the audio with Hermes `text_to_speech`.
-2. Make the resulting MP3 publicly reachable.
-3. Place the Twilio call with `--audio-url`.
-
-Example agent flow:
-- Ask Hermes to create the message audio with `text_to_speech`
-- If needed, expose the file with a temporary static host / tunnel / object storage URL
-- Use `twilio-call --audio-url ...` to deliver it by phone
-
-Good hosting options for the MP3:
-- a temporary public object/storage URL
-- a short-lived tunnel to a local static file server
-- any existing HTTPS URL the phone provider can fetch directly
-
-Important note:
-- Hermes TTS is great for prerecorded outbound messages
-- Bland/Vapi are better for **live conversational AI calls** because they handle the real-time telephony audio stack themselves
-- Hermes STT/TTS alone is not being used here as a full duplex phone conversation engine; that would require a much heavier streaming/webhook integration than this skill is trying to introduce
-
-### F. Navigate a phone tree / IVR with Twilio direct calling
-
-If you need to press digits after the call connects, use `--send-digits`.
-Twilio interprets `w` as a short wait.
-
-```bash
-python "$SCRIPT" twilio-call "+18005551234" --message "Connecting to billing now." --send-digits "ww1w2w3"
-```
-
-This is useful for reaching a specific menu branch before handing off to a human or delivering a short status message.
-
-### G. Outbound AI phone call with Bland.ai
-
-```bash
-python "$SCRIPT" ai-call "+15551230000" "Call the dental office, ask for a cleaning appointment on Tuesday afternoon, and if they do not have Tuesday availability, ask for Wednesday or Thursday instead." --provider bland --voice mason --max-duration 3
-```
-
-Check status:
-
-```bash
-python "$SCRIPT" ai-status <call_id> --provider bland
-```
-
-Ask Bland analysis questions after completion:
-
-```bash
-python "$SCRIPT" ai-status <call_id> --provider bland --analyze "Was the appointment confirmed?,What date and time?,Any special instructions?"
-```
-
-### H. Outbound AI phone call with Vapi on your owned number
-
-1. Import your Twilio number into Vapi:
-```bash
-python "$SCRIPT" vapi-import-twilio --save-env
-```
-
-2. Place the call:
-```bash
-python "$SCRIPT" ai-call "+15551230000" "You are calling to make a dinner reservation for two at 7:30 PM. If that is unavailable, ask for the nearest time between 6:30 and 8:30 PM." --provider vapi --max-duration 4
-```
-
-3. Check result:
-```bash
-python "$SCRIPT" ai-status <call_id> --provider vapi
-```
-
-## Suggested agent procedure
-
-When the user asks for a call or text:
-
-1. Determine which path fits the request via the decision tree.
-2. Run `diagnose` if configuration state is unclear.
-3. Gather the full task details.
-4. Confirm with the user before dialing or texting.
-5. Use the correct command.
-6. Poll for results if needed.
-7. Summarize the outcome without persisting third-party numbers to Hermes memory.
-
-## What this skill still does not do
-
-- real-time inbound call answering
-- webhook-based live SMS push into the agent loop
-- guaranteed support for arbitrary third-party 2FA providers
-
-Those would require more infrastructure than a pure optional skill.
+`wave-health` uses no credentials and proves only HTTP service health. Dry-run
+validates destination/caller syntax and makes no HTTP request. `wave-logs` needs
+`calls:read`. No command here allocates a Wave number or installs webhooks.
+
+The exact `/v1/calls` request accepts `to`, `caller_id_name`, `caller_id_number`
+and metadata. This helper does not accept an AI persona, live audio or a booking
+task. WaveML AI flows are provisioned separately; do not promise a conversational
+booking from successful call initiation.
+
+### 4. Execute the authorized provider operation
+
+For a verified Wave account, owned caller ID and enabled flow, an authorized
+live call uses `wave-call '<Saudi destination>' --confirm`. The helper requires
+a production key and caller ID. The provider remains responsible for checking
+key validity, scopes, number ownership and account eligibility.
+
+For Twilio, search with `twilio-search --country <ISO> --limit 5`; buy only when
+purchase is authorized, using `twilio-buy '<number>' --save-env`. Import an owned
+Twilio number into Vapi with `vapi-import-twilio --save-env` if needed.
+
+For a direct Twilio voice message, choose `--message` or `--audio-url`. Existing
+`text_to_speech` can prepare audio, but publishing private audio to a provider
+must be within the task's authorization. This is one-way audio, not a conversation.
+
+For an AI call, use `ai-call '<destination>' '<bounded task>' --provider bland|vapi
+--max-duration 3`. For Vapi, first verify its imported phone-number ID.
+
+### 5. Verify the outcome and stop
+
+Poll call status/logs using the returned call ID. An HTTP accepted/initiated
+response does not prove ringing, answering, conversation success or a booking.
+If a call-creation request times out or fails ambiguously, inspect recent calls
+before retrying; the Wave call endpoint has no documented idempotency key.
+
+Twilio inbox polling supports `--since-last --mark-seen` to continue from the
+saved checkpoint. Results may contain message content or OTPs: summarize only
+what the task needs and keep secrets out of memory and follow-up notes.
 
 ## Pitfalls
 
-- Twilio trial accounts and regional rules can restrict who you can call/text.
-- Some services reject VoIP numbers for 2FA.
-- `twilio-inbox` polls the REST API; it is not instant push delivery.
-- Vapi outbound calling still depends on having a valid imported number.
-- Bland is easiest, but not always the best-sounding.
-- Do not store arbitrary third-party phone numbers in Hermes memory.
+- Do not persist third-party phone numbers in Hermes memory unless requested.
+  Owned-number identifiers belong in configuration; mask destinations in reports.
+- Do not assume a VoIP number works for account verification or passkeys.
+- Wave SMS is not proven live; WhatsApp documentation is inconsistent and neither
+  messaging path is implemented here. Voice is not a two-way SMS substitute.
+- Wave's webhook guide says only `call.initiated` currently emits. No webhook
+  server, inbound live-answering loop or conversational booking backend ships here.
+- A shared hosted account is not permission to borrow personal credentials across profiles.
+- No cancellation, payment or legal commitment may be inferred from a call response.
 
-## Verification checklist
+## Verification
 
-After setup, you should be able to do all of the following with just this skill:
+Run `scripts/run_tests.sh tests/skills/test_telephony_skill.py -q` in the repo.
+The suite checks persistence, dry-run isolation, Saudi validation, private file
+creation, credential-free prompting, masked output and safe provider errors.
+It does not prove production service, call quality, KYC, number assignment or
+conversation E2E. After actual account setup, verify the specifically authorized
+call through initiation, answered/ended state and the requested business outcome.
 
-1. `diagnose` shows provider readiness and remembered state
-2. search and buy a Twilio number
-3. persist that number to `${HERMES_HOME:-~/.hermes}/.env`
-4. send an SMS from the owned number
-5. poll inbound texts for the owned number later
-6. place a direct Twilio call
-7. place an AI call via Bland or Vapi
-
-## References
-
-- Twilio phone numbers: https://www.twilio.com/docs/phone-numbers/api
-- Twilio messaging: https://www.twilio.com/docs/messaging/api/message-resource
-- Twilio voice: https://www.twilio.com/docs/voice/api/call-resource
-- Vapi docs: https://docs.vapi.ai/
-- Bland.ai: https://app.bland.ai/
+References: [Wave](https://docs.wave.sa/),
+[Twilio phone numbers](https://www.twilio.com/docs/phone-numbers/api),
+[Twilio voice](https://www.twilio.com/docs/voice/api/call-resource),
+[Twilio messaging](https://www.twilio.com/docs/messaging/api/message-resource),
+[Vapi](https://docs.vapi.ai/), [Bland](https://docs.bland.ai/).

@@ -1,0 +1,33 @@
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 8 test files (~165 tests) under ['tests/agent/test_file_safety.py', 'tests/agent/test_file_safety_credentials.py', 'tests/agent/test_file_safety_cross_profile.py', 'tests/agent/test_redact.py', 'tests/hermes_cli/test_auth_profile_fallback.py', 'tests/hermes_cli/test_env_loader.py', 'tests/hermes_cli/test_secret_source_bootstrap.py', 'tests/hermes_cli/test_auth_store_lock_concurrent.py']; running with -j 20
+[  0.6% |     1/~165 | ✓0 | ✗0] ✓ tests/hermes_cli/test_auth_store_lock_concurrent.py (1s, 1.9s)
+[  4.8% |     8/~165 | ✓10 | ✗ 0] ✓ tests/agent/test_file_safety_cross_profile.py (10✓, 4.2s)
+[  9.1% |    15/~165 | ✓17 | ✗ 0] ✓ tests/hermes_cli/test_auth_profile_fallback.py (7✓, 4.3s)
+[ 14.5% |    24/~165 | ✓26 | ✗ 0] ✓ tests/agent/test_file_safety_credentials.py (9✓, 4.7s)
+[ 19.4% |    32/~165 | ✓34 | ✗ 0] ✓ tests/hermes_cli/test_secret_source_bootstrap.py (8✓, 4.8s)
+[ 23.6% |    39/~165 | ✓50 | ✗ 0] ✓ tests/agent/test_file_safety.py (16✓, 5.1s)
+[ 39.4% |    65/~165 | ✓76 | ✗ 0] ✓ tests/hermes_cli/test_env_loader.py (26✓, 6.1s)
+[100.0% |   165/~165 | ✓192 | ✗  0] ✓ tests/agent/test_redact.py (116✓, 9.3s)
+
+=== Summary: 8 files, 192 tests passed, 0 failed, 1 skipped (100% complete) in 9.3s (20 workers) ===
+
+  note: windows_only tests (in 1 file) were SKIPPED on this host (darwin); they run on the tests-os CI lane (windows-latest).
+  Durations cached to test_durations.json (8 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   8
+  Total subprocess CPU-wall: 40.4s  (runner wall: 9.3s, parallelism: 20x)
+  P50: 4.78s  P90: 9.27s  P95: 9.27s  P99: 9.27s  Max: 9.27s
+  <1s: 0 files (0%)  <2s: 1 files (12%)
+  Top 10 slowest:
+      9.27s  tests/agent/test_redact.py
+      6.08s  tests/hermes_cli/test_env_loader.py
+      5.09s  tests/agent/test_file_safety.py
+      4.78s  tests/hermes_cli/test_secret_source_bootstrap.py
+      4.74s  tests/agent/test_file_safety_credentials.py
+      4.28s  tests/hermes_cli/test_auth_profile_fallback.py
+      4.25s  tests/agent/test_file_safety_cross_profile.py
+      1.92s  tests/hermes_cli/test_auth_store_lock_concurrent.py

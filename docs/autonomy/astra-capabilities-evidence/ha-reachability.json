@@ -1,0 +1,42 @@
+{
+  "utc": "2026-09-04T22:32:04Z",
+  "lan_subnet": "192.168.68.0/24",
+  "lan_hosts_probed": 254,
+  "port": 8123,
+  "open_hosts": [],
+  "hostnames": {
+    "homeassistant.local": {
+      "resolved": false
+    },
+    "hassio.local": {
+      "resolved": false
+    },
+    "localhost": {
+      "resolved": true,
+      "port8123_open": false
+    }
+  },
+  "tailscale": [
+    {
+      "name": "self",
+      "online": true,
+      "port8123_open": false
+    },
+    {
+      "name": "srv1945447",
+      "online": true,
+      "port8123_open": false
+    },
+    {
+      "name": "srv1853266",
+      "online": false,
+      "port8123_open": false
+    },
+    {
+      "name": "localhost",
+      "online": false,
+      "port8123_open": false
+    }
+  ],
+  "mdns_advertisements": ""
+}

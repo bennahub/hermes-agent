@@ -1,0 +1,27 @@
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 6 test files (~73 tests) under ['tests/skills/test_telephony_skill.py', 'tests/skills/test_personal_operations_skill.py', 'tests/agent/test_secret_scope.py', 'tests/tools/test_homeassistant_tool.py', 'tests/hermes_cli/test_auth_toctou_file_modes.py', 'tests/hermes_cli/test_auth_provider_scope.py']; running with -j 20
+[  5.5% |     4/~73 | ✓4 | ✗0] ✓ tests/skills/test_personal_operations_skill.py (4✓, 2.1s)
+[  9.6% |     7/~73 | ✓7 | ✗0] ✓ tests/hermes_cli/test_auth_provider_scope.py (3✓, 2.2s)
+[ 17.8% |    13/~73 | ✓13 | ✗ 0] ✓ tests/skills/test_telephony_skill.py (6✓, 2.5s)
+[ 23.3% |    17/~73 | ✓17 | ✗ 0] ✓ tests/hermes_cli/test_auth_toctou_file_modes.py (4✓, 2.5s)
+[ 56.2% |    41/~73 | ✓41 | ✗ 0] ✓ tests/agent/test_secret_scope.py (24✓, 3.8s)
+[100.0% |    73/~73 | ✓78 | ✗ 0] ✓ tests/tools/test_homeassistant_tool.py (37✓, 6.4s)
+
+=== Summary: 6 files, 78 tests passed, 0 failed (100% complete) in 6.4s (20 workers) ===
+  Durations cached to test_durations.json (6 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   6
+  Total subprocess CPU-wall: 19.6s  (runner wall: 6.4s, parallelism: 20x)
+  P50: 2.53s  P90: 6.36s  P95: 6.36s  P99: 6.36s  Max: 6.36s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+      6.36s  tests/tools/test_homeassistant_tool.py
+      3.82s  tests/agent/test_secret_scope.py
+      2.53s  tests/skills/test_telephony_skill.py
+      2.52s  tests/hermes_cli/test_auth_toctou_file_modes.py
+      2.20s  tests/hermes_cli/test_auth_provider_scope.py
+      2.14s  tests/skills/test_personal_operations_skill.py

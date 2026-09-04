@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import getpass
 import json
 import os
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +37,9 @@ from typing import Any
 TWILIO_API_BASE = "https://api.twilio.com/2010-04-01/Accounts"
 VAPI_API_BASE = "https://api.vapi.ai"
 BLAND_API_BASE = "https://api.bland.ai/v1"
+WAVE_API_BASE = "https://api.wave.sa"
+# Wave production destinations: Saudi geographic / mobile / toll-free / 9200.
+WAVE_SA_NUMBER_RE = re.compile(r"^(\+966|0)(1[1-9]\d{7}|5\d{8}|800\d{7}|9200\d{6})$")
 
 BLAND_DEFAULT_VOICE = "mason"
 BLAND_DEFAULT_MODEL = "enhanced"
@@ -164,6 +169,8 @@ def _save_state(state: dict[str, Any], path: Path | None = None) -> Path:
 
 
 def _quote_env_value(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise TelephonyError("Credential values must be a single line")
     if re.fullmatch(r"[A-Za-z0-9_./:+@-]+", value):
         return value
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
@@ -199,7 +206,18 @@ def _upsert_env_file(updates: dict[str, str], env_path: Path | None = None) -> P
         if key not in seen:
             new_lines.append(f"{key}={_quote_env_value(str(value))}")
 
-    path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+    # mkstemp creates mode 0600 before any credential bytes are written.
+    # Replace atomically so a failed write cannot truncate the existing .env.
+    fd, temporary = tempfile.mkstemp(prefix=".telephony-env-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(new_lines).rstrip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return path
 
 
@@ -215,6 +233,31 @@ def _normalize_phone(number: str) -> str:
     if len(digits) < 8:
         raise TelephonyError(f"Phone number looks too short: {number}")
     return digits
+
+
+def _normalize_sa_phone(number: str) -> str:
+    """Normalize a Saudi number to E.164 for Wave ``POST /v1/calls``.
+
+    Accepts ``+9665XXXXXXXX``, ``05XXXXXXXX``, or a 9-digit mobile ``5XXXXXXXX``.
+    """
+    if not number or not str(number).strip():
+        raise TelephonyError("Saudi phone number is required")
+    digits = re.sub(r"\D", "", str(number))
+    if digits.startswith("966"):
+        e164 = "+" + digits
+        national = "0" + digits[3:]
+    elif digits.startswith("0"):
+        e164 = "+966" + digits[1:]
+        national = digits
+    else:
+        e164 = "+966" + digits
+        national = "0" + digits
+    if WAVE_SA_NUMBER_RE.fullmatch(e164) or WAVE_SA_NUMBER_RE.fullmatch(national):
+        return e164
+    raise TelephonyError(
+        "Wave destinations must be a Saudi number (+9665XXXXXXXX or 05XXXXXXXX). "
+        "The supplied number is invalid."
+    )
 
 
 def _mask_phone(number: str) -> str:
@@ -990,7 +1033,212 @@ def _provider_decision_tree() -> list[dict[str, str]]:
             "use": "Twilio direct call + public audio URL",
             "why": "Generate or host audio separately, then let Twilio play it with a simple outbound call.",
         },
+        {
+            "need": "I need one shared Saudi +966 number for local voice (Twilio cannot do this).",
+            "use": "Wave (fallback Unifonic)",
+            "why": (
+                "Wave documents Saudi number allocation and POST /v1/calls. "
+                "Production eligibility, number entitlement, pricing and account voice flow require vendor confirmation. "
+                "Unifonic and CEQUENS are alternatives to compare if Wave cannot enable this account."
+            ),
+        },
     ]
+
+
+def _wave_api_key() -> str:
+    return _env_or_config(
+        "WAVE_API_KEY",
+        ("telephony", "wave", "api_key"),
+        ("phone", "wave", "api_key"),
+    )
+
+
+def _wave_from_number() -> str:
+    return _env_or_config(
+        "WAVE_FROM_NUMBER",
+        ("telephony", "wave", "from_number"),
+        ("phone", "wave", "from_number"),
+    )
+
+
+def _wave_headers(api_key: str | None = None) -> dict[str, str]:
+    key = (api_key or _wave_api_key()).strip()
+    if not key:
+        raise TelephonyError(
+            "Wave is not configured. Use 'save-wave' or set WAVE_API_KEY in "
+            f"{_env_path()}. Live calls also need a production key (sk_live_) "
+            "after Owner KYC / Go-Live."
+        )
+    return {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+    }
+
+
+def _wave_key_kind(api_key: str) -> str:
+    if api_key.startswith("sk_live_"):
+        return "live"
+    if api_key.startswith("sk_sandbox_"):
+        return "sandbox"
+    return "unknown"
+
+
+def _wave_request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    """Keep provider error bodies, which may echo credentials, out of results."""
+    try:
+        return _json_request(method, f"{WAVE_API_BASE}{path}", **kwargs)
+    except TelephonyError as exc:
+        status = re.search(r"HTTP (\d{3})", str(exc))
+        suffix = f" (HTTP {status.group(1)})" if status else ""
+        raise TelephonyError(
+            f"Wave request failed{suffix}. Check account status, scopes and Go-Live "
+            "in the Wave dashboard. Call initiation was not confirmed; inspect "
+            "call logs before retrying to avoid a duplicate call."
+        ) from None
+
+
+def save_wave(api_key: str, from_number: str = "", caller_id_name: str = "") -> dict[str, Any]:
+    key = api_key.strip()
+    if not key:
+        raise TelephonyError("WAVE_API_KEY is required")
+    if not re.fullmatch(r"sk_(?:live|sandbox)_[A-Za-z0-9_-]+", key):
+        raise TelephonyError("Expected a Wave sk_live_ or sk_sandbox_ key")
+    updates = {"WAVE_API_KEY": key}
+    if from_number:
+        updates["WAVE_FROM_NUMBER"] = _normalize_sa_phone(from_number)
+    if caller_id_name.strip():
+        updates["WAVE_CALLER_ID_NAME"] = caller_id_name.strip()[:64]
+    env_file = _upsert_env_file(updates)
+    kind = _wave_key_kind(key)
+    return {
+        "success": True,
+        "provider": "wave",
+        "saved_env_keys": sorted(updates),
+        "env_path": str(env_file),
+        "key_kind": kind,
+        "external_gate": kind != "live" or not bool(from_number or _wave_from_number()),
+        "provider_verified": False,
+        "message": (
+            f"Wave credentials saved to {env_file}. "
+            "POST /v1/calls is dry-run unless you pass --confirm after Owner KYC."
+        ),
+    }
+
+
+def wave_health() -> dict[str, Any]:
+    payload = _wave_request("GET", "/v1/health")
+    return {
+        "success": True,
+        "provider": "wave",
+        "status": payload.get("status", ""),
+        "service": payload.get("service", ""),
+    }
+
+
+def wave_call(
+    to_number: str,
+    *,
+    confirm: bool = False,
+    caller_id_name: str = "",
+    caller_id_number: str = "",
+) -> dict[str, Any]:
+    """Place or preview a Wave outbound call.
+
+    Default is a dry-run: validates the Saudi destination and reports
+    EXTERNAL_GATE when no live key is present. Never POSTs unless
+    ``confirm=True``.
+    """
+    destination = _normalize_sa_phone(to_number)
+    api_key = _wave_api_key()
+    kind = _wave_key_kind(api_key) if api_key else "missing"
+    body: dict[str, Any] = {"to": destination}
+    name = caller_id_name.strip() or _env_or_config(
+        "WAVE_CALLER_ID_NAME",
+        ("telephony", "wave", "caller_id_name"),
+    )
+    if name:
+        body["caller_id_name"] = name[:64]
+    from_number = caller_id_number.strip() or _wave_from_number()
+    if from_number:
+        body["caller_id_number"] = _normalize_sa_phone(from_number)
+    result = {
+        "success": True,
+        "provider": "wave",
+        "dry_run": not confirm,
+        "key_kind": kind,
+        "to_phone_number_masked": _mask_phone(destination),
+        "request": {k: v for k, v in body.items() if k != "to"} | {"to_masked": _mask_phone(destination)},
+        "external_gate": kind != "live" or not bool(from_number),
+        "provider_verified": False,
+        "notes": [
+            "Wave POST /v1/calls requires calls:write and a production key.",
+            "Sandbox keys can only place web callbacks, not unconstrained outbound calls.",
+            "Owner KYC / Go-Live is EXTERNAL_GATE. Do not provision a number from this skill.",
+            "A key prefix does not prove account eligibility, number ownership or an AI call flow.",
+            "This command initiates the account's configured call flow; it does not supply a booking task.",
+        ],
+    }
+    if not confirm:
+        result["message"] = (
+            "Dry-run only. Re-run with --confirm after Owner KYC and a sk_live_ key "
+            "to place a real Wave call."
+        )
+        return result
+    if kind != "live":
+        raise TelephonyError(
+            "Refusing live Wave call: production key (sk_live_) required. "
+            "Owner must complete Wave Go-Live / KYC first (EXTERNAL_GATE)."
+        )
+    if not from_number:
+        raise TelephonyError("Wave from-number is required; configure an owned Saudi number before calling (EXTERNAL_GATE).")
+    payload = _wave_request(
+        "POST",
+        "/v1/calls",
+        headers=_wave_headers(api_key),
+        json_body=body,
+    )
+    return {
+        "success": True,
+        "provider": "wave",
+        "dry_run": False,
+        "call_id": payload.get("call_id", ""),
+        "status": payload.get("status", ""),
+        "direction": payload.get("direction", "outbound"),
+        "to_phone_number_masked": _mask_phone(destination),
+        "sandbox": payload.get("sandbox"),
+        "message": "Wave outbound call accepted.",
+    }
+
+
+def wave_logs(*, limit: int = 20, cursor: str = "") -> dict[str, Any]:
+    api_key = _wave_api_key()
+    if not api_key:
+        raise TelephonyError("Wave is not configured.")
+    params: dict[str, Any] = {"limit": max(1, min(int(limit), 100))}
+    if cursor:
+        params["cursor"] = cursor
+    payload = _wave_request(
+        "GET",
+        "/v1/calls",
+        headers=_wave_headers(api_key),
+        params=params,
+    )
+    return {
+        "success": True,
+        "provider": "wave",
+        "calls": [
+            {
+                **{key: call[key] for key in (
+                    "id", "type", "status", "duration_seconds", "created_at",
+                    "answered_at", "ended_at",
+                ) if key in call},
+                "to_masked": _mask_phone(str(call.get("to_masked") or call.get("to") or "")),
+                "from_masked": _mask_phone(str(call.get("from") or "")),
+            }
+            for call in payload.get("data", []) if isinstance(call, dict)
+        ],
+        "next_cursor": payload.get("next_cursor"),
+    }
 
 
 def diagnose() -> dict[str, Any]:
@@ -1019,6 +1267,8 @@ def diagnose() -> dict[str, Any]:
     bland_key = _bland_api_key()
     vapi_key = _vapi_api_key()
     vapi_phone_id = _vapi_phone_number_id() or str(vapi_state.get("phone_number_id", ""))
+    wave_key = _wave_api_key()
+    wave_kind = _wave_key_kind(wave_key) if wave_key else "missing"
 
     return {
         "success": True,
@@ -1042,6 +1292,14 @@ def diagnose() -> dict[str, Any]:
                     ("phone", "bland", "default_voice"),
                     default=BLAND_DEFAULT_VOICE,
                 ),
+            },
+            "wave": {
+                "configured": bool(wave_key),
+                "key_kind": wave_kind,
+                "from_number_configured": bool(_wave_from_number()),
+                "external_gate": wave_kind != "live" or not bool(_wave_from_number()),
+                "provider_verified": False,
+                "live_number": None,
             },
             "vapi": {
                 "configured": bool(vapi_key),
@@ -1071,6 +1329,8 @@ def diagnose() -> dict[str, Any]:
             "Twilio is the best path for owning a durable phone number, texting, and polling inbound SMS.",
             "Bland is the easiest path for outbound AI calls only.",
             "Vapi is best when you want better AI voice quality, usually backed by a Twilio-owned number.",
+            "Wave is a provisional Saudi +966 path, pending provider production/account-flow confirmation and Owner KYC.",
+            "Unifonic and CEQUENS are alternatives; neither has a client in this skill.",
             "VoIP numbers are not guaranteed to work for every third-party 2FA flow.",
         ],
     }
@@ -1168,6 +1428,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--voice-id", default=VAPI_DEFAULT_VOICE_ID)
     p.add_argument("--model", default=VAPI_DEFAULT_MODEL)
 
+    p = sub.add_parser("save-wave", help="Save Wave API credentials to the Hermes .env file")
+    p.add_argument("api_key", nargs="?", help="Omit for hidden Owner input; avoid credentials in shell history")
+    p.add_argument("--from-number", default="")
+    p.add_argument("--caller-id-name", default="")
+
+    sub.add_parser("wave-health", help="GET /v1/health on api.wave.sa (no credentials)")
+
+    p = sub.add_parser("wave-call", help="Preview or place a Wave outbound call (dry-run unless --confirm)")
+    p.add_argument("to_number")
+    p.add_argument("--confirm", action="store_true", help="Actually POST /v1/calls (requires sk_live_)")
+    p.add_argument("--caller-id-name", default="")
+    p.add_argument("--from-number", default="")
+
+    p = sub.add_parser("wave-logs", help="List Wave call logs (masked destinations)")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--cursor", default="")
+
     p = sub.add_parser("twilio-search", help="Search Twilio numbers available for purchase")
     p.add_argument("--country", default="US")
     p.add_argument("--area-code", default="")
@@ -1246,6 +1523,23 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             voice_id=args.voice_id,
             model=args.model,
         )
+    if cmd == "save-wave":
+        return save_wave(
+            args.api_key if args.api_key is not None else getpass.getpass("Wave API key (hidden): "),
+            from_number=args.from_number,
+            caller_id_name=args.caller_id_name,
+        )
+    if cmd == "wave-health":
+        return wave_health()
+    if cmd == "wave-call":
+        return wave_call(
+            args.to_number,
+            confirm=args.confirm,
+            caller_id_name=args.caller_id_name,
+            caller_id_number=args.from_number,
+        )
+    if cmd == "wave-logs":
+        return wave_logs(limit=args.limit, cursor=args.cursor)
     if cmd == "twilio-search":
         return _twilio_search_numbers(
             country=args.country,

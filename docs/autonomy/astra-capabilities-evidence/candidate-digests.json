@@ -1,0 +1,7 @@
+{
+  "optional-skills/productivity/telephony/SKILL.md": "c2e9392419caf40e34a300f4e2fcbcfe162a31e40894d9514b89f838a89e1e03",
+  "optional-skills/productivity/telephony/scripts/telephony.py": "a546aae3ab3db3bc6bd5d513efe584a619d02c5d105a62ab36b42b5aaad184fa",
+  "optional-skills/productivity/personal-operations/SKILL.md": "a7c435087fe4ed85d2139675b2abaaebf6b6dcd5afdb6974e0edcf2caec26464",
+  "tests/skills/test_telephony_skill.py": "27589486baae454994d4864e024457f9158b8a8625092f80d2c881d3ce8f6842",
+  "tests/skills/test_personal_operations_skill.py": "60d3a4efe0ba8f1e5c1b9b91dc425c9b645c506430713d34f47cb14dae7951b7"
+}

@@ -1,0 +1,19 @@
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 2 test files (~16 tests) under ['tests/skills/test_telephony_skill.py', 'tests/skills/test_personal_operations_skill.py']; running with -j 20
+[ 25.0% |     4/~16 | ✓4 | ✗0] ✓ tests/skills/test_personal_operations_skill.py (4✓, 2.5s)
+[100.0% |    16/~16 | ✓16 | ✗ 0] ✓ tests/skills/test_telephony_skill.py (12✓, 3.0s)
+
+=== Summary: 2 files, 16 tests passed, 0 failed (100% complete) in 3.0s (20 workers) ===
+  Durations cached to test_durations.json (2 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   2
+  Total subprocess CPU-wall: 5.5s  (runner wall: 3.0s, parallelism: 20x)
+  P50: 2.96s  P90: 2.96s  P95: 2.96s  P99: 2.96s  Max: 2.96s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+      2.96s  tests/skills/test_telephony_skill.py
+      2.50s  tests/skills/test_personal_operations_skill.py

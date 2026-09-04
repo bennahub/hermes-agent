@@ -1,0 +1,50 @@
+{
+  "profile_homes": 15,
+  "all_env_mode_0600": true,
+  "all_auth_mode_0600": true,
+  "wave_or_ha_configured": [],
+  "vaults_enabled": [],
+  "real_browser_profile_enabled": [],
+  "hamad": {
+    "profile": "hamad",
+    "env_exists": true,
+    "env_mode": "0o600",
+    "auth_exists": true,
+    "auth_mode": "0o600",
+    "credentials": {
+      "WAVE_API_KEY": "absent",
+      "WAVE_FROM_NUMBER": "absent",
+      "HASS_TOKEN": "absent",
+      "HASS_URL": "absent"
+    },
+    "google_files": {
+      "google_token.json": false,
+      "google_client_secret.json": false
+    },
+    "skills": {
+      "telephony": [],
+      "personal-operations": [],
+      "maps": [
+        "skills/productivity/maps/SKILL.md"
+      ],
+      "google-workspace": [
+        "skills/productivity/google-workspace/SKILL.md"
+      ]
+    },
+    "vault_enabled": {
+      "onepassword": false,
+      "bitwarden": false
+    },
+    "real_browser_profile": false
+  },
+  "commands": {
+    "op": false,
+    "bws": false,
+    "bw": false,
+    "docker": true,
+    "colima": false,
+    "lima": false,
+    "podman": false,
+    "tailscale": true
+  }
+}

@@ -1,0 +1,21 @@
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 3 test files (~63 tests) under ['tests/agent/test_secret_scope.py', 'tests/tools/test_homeassistant_tool.py', 'tests/hermes_cli/test_auth_profile_fallback.py']; running with -j 4
+[ 11.1% |     7/~63 | ✓7 | ✗0] ✓ tests/hermes_cli/test_auth_profile_fallback.py (7✓, 0.9s)
+[ 49.2% |    31/~63 | ✓31 | ✗ 0] ✓ tests/agent/test_secret_scope.py (24✓, 0.9s)
+[100.0% |    63/~63 | ✓68 | ✗ 0] ✓ tests/tools/test_homeassistant_tool.py (37✓, 1.8s)
+
+=== Summary: 3 files, 68 tests passed, 0 failed (100% complete) in 1.8s (4 workers) ===
+  Durations cached to test_durations.json (3 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   3
+  Total subprocess CPU-wall: 3.6s  (runner wall: 1.8s, parallelism: 4x)
+  P50: 0.93s  P90: 1.79s  P95: 1.79s  P99: 1.79s  Max: 1.79s
+  <1s: 2 files (67%)  <2s: 3 files (100%)
+  Top 10 slowest:
+      1.79s  tests/tools/test_homeassistant_tool.py
+      0.93s  tests/agent/test_secret_scope.py
+      0.86s  tests/hermes_cli/test_auth_profile_fallback.py
