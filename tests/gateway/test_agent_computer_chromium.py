@@ -81,7 +81,8 @@ requires_chrome = pytest.mark.skipif(
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = (_HUMAN_PAGE if "human" in self.path else _PAGE).encode("utf-8")
+        page = _NATIVE_FORM_PAGE if self.path.startswith('/native-form.html') else (_HUMAN_PAGE if "human" in self.path else _PAGE)
+        body = page.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -127,6 +128,14 @@ _HUMAN_INPUT = (166.0, 100.0)
 _HUMAN_AGENT = (116.0, 184.0)
 _HUMAN_OWNER = (500.0, 184.0)
 _HUMAN_SCROLL = (166.0, 300.0)
+
+_NATIVE_FORM_PAGE = """<!doctype html><html><head><title>Native form fixture</title>
+<style>body{margin:0}#search{position:absolute;left:16px;top:48px;width:300px;height:40px}
+#submit{position:absolute;left:350px;top:48px;width:120px;height:40px}
+#multiline{position:absolute;left:16px;top:180px;width:400px;height:160px}</style></head>
+<body><form action="/native-submitted.html" method="get">
+<input id="search" name="q" autocomplete="off"><button id="submit" type="submit">Search</button>
+</form><textarea id="multiline"></textarea></body></html>"""
 
 
 @pytest.fixture
@@ -840,3 +849,49 @@ def test_real_takeover_client_keyboard_doubleclick_fullscreen_and_responsive(chr
     wait_for("matchMedia('(max-width:720px)').matches && getComputedStyle(document.querySelector('header')).flexDirection === 'column'")
     assert evaluate('document.documentElement.scrollWidth <= innerWidth'), evaluate("({width:innerWidth,scroll:document.documentElement.scrollWidth,overflow:[...document.querySelectorAll('*')].map(e=>({id:e.id,tag:e.tagName,x:e.getBoundingClientRect().x,right:e.getBoundingClientRect().right})).filter(r=>r.right>innerWidth+1)})")
     assert evaluate("document.getElementById('giveOverlay').getBoundingClientRect().bottom < document.getElementById('surface').getBoundingClientRect().top")
+
+
+@requires_chrome
+def test_real_chromium_enter_submits_native_form_and_inserts_textarea_newlines(chromium_pair, local_page):
+    import time
+    from urllib.parse import parse_qs, urlsplit
+    from gateway.agent_computer.adapter import loopback_cdp
+
+    svc, runtime, _ = chromium_pair
+    computer, _, _, _ = _boot(svc)
+    handle = svc._handles[computer.id]
+    form_url = local_page.replace('synthetic.html', 'native-form.html')
+    runtime.stream_nav(handle, 'open', form_url)
+
+    def press(key, modifiers=0):
+        runtime.stream_key(handle, phase='down', key=key, code=key, modifiers=modifiers)
+        runtime.stream_key(handle, phase='up', key=key, code=key, modifiers=modifiers)
+
+    runtime.stream_pointer(handle, phase='click', x=166, y=68)
+    for key in 'zeusx':
+        press(key)
+    press('Backspace')
+    press('Enter')
+    deadline = time.monotonic() + 5
+    location = runtime.current_location(handle)['url']
+    while urlsplit(location).path != '/native-submitted.html' and time.monotonic() < deadline:
+        time.sleep(.05)
+        location = runtime.current_location(handle)['url']
+    assert urlsplit(location).path == '/native-submitted.html'
+    assert parse_qs(urlsplit(location).query) == {'q': ['zeus']}
+
+    # Browser-native editing defaults, without any keydown or submit handler.
+    runtime.stream_nav(handle, 'open', form_url)
+    runtime.stream_pointer(handle, phase='click', x=166, y=220)
+    for key in 'first':
+        press(key)
+    press('Enter')
+    for key in 'second':
+        press(key)
+    press('Enter', modifiers=8)
+    for key in 'third':
+        press(key)
+    result = loopback_cdp(handle, 'Runtime.evaluate', {
+        'expression': 'document.getElementById("multiline").value', 'returnByValue': True,
+    })
+    assert result['result']['value'] == 'first\nsecond\nthird'

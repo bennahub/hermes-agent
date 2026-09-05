@@ -180,6 +180,38 @@ The exact same final five-file suite also passes **90/90 on native macOS**, with
 zero failures in **16.5 seconds**, through the canonical runner. Both hosts retain
 their real platform identity; no `sys.platform` substitution was used.
 
+### Native Enter default-action follow-up
+
+Root's public Wikipedia journey reopened a keyboard defect: typing and Backspace
+worked, but two Return attempts did not submit the search form; clicking Search
+with the same text navigated immediately. The earlier fixture's custom keydown
+handler had hidden the distinction between a raw key event and a native default
+action.
+
+An independent protected Linux comparison against unchanged deployed `5936efec`
+reproduced the failure with an ordinary GET form containing no JavaScript handler.
+The exact same scenario passed when Enter alone used CDP `keyDown` with carriage
+return `text`/`unmodifiedText`, followed by a text-free `keyUp`. This also produced
+native textarea newlines for Enter and Shift+Enter. The
+[CDP Input contract](https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-dispatchKeyEvent)
+documents the event types and character fields; native Chromium execution proves
+the submission/editing behavior here.
+
+The product follow-up adds four lines in `keys.py`. Plain/Shift Enter uses the
+character/default-action path; Ctrl/Alt/Meta combinations retain raw keydown and
+keyup remains text-free. The new real-browser regression types `zeusx`, removes
+the final character with Backspace, submits a native GET form with Enter, verifies
+its query value, then verifies plain/Shift Enter textarea newlines. Unit coverage
+also checks the release and Ctrl+Enter payloads.
+
+The final focused suite now passes **91/91 on native Mac (18.9 seconds)** and
+**91/91 in the protected native Linux candidate tree (15.8 seconds)**, including
+**seven real Chromium tests**. The deployed baseline failure and supported-event
+comparison are preserved in `work/c0-evidence/enter-native-baseline-comparison.log`.
+The candidate remains subject to external delta review, selective deployment and
+a repeated public journey. The frame pump/runtime/resource architecture is
+unchanged; the earlier resource measurements retain their exact measured identity.
+
 ## Deployment and remaining acceptance
 
 Use the exact nine-file delta manifest, verify every live preimage before writes,
@@ -192,6 +224,10 @@ For a deployment already at `90f4285`, apply only the reviewed native-Linux
 follow-up adapter delta using `work/c0-evidence/native-repair-deployment-manifest.json`.
 The earlier nine-file manifest describes the initial transition from the
 inherited overlay, not a second whole-delta replay.
+
+For a deployment already at `5936efec`, the Enter follow-up changes only
+`gateway/agent_computer/keys.py`; use the 17-file final identity and one-file deploy
+flag in `work/c0-evidence/enter-repair-deployment-manifest.json`.
 
 After integration: check service health/restarts and re-run the focused suites,
 then execute the full authenticated public `/computer` fixture and Wikipedia

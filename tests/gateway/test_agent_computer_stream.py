@@ -160,7 +160,14 @@ def test_cdp_key_params_named_and_printable():
     enter = cdp_key_params(phase="down", key="Enter")
     assert enter["key"] == "Enter"
     assert enter["windowsVirtualKeyCode"] == 13
-    assert enter["type"] == "rawKeyDown"
+    assert enter["type"] == "keyDown"
+    assert enter["text"] == enter["unmodifiedText"] == "\r"
+    released = cdp_key_params(phase="up", key="Enter")
+    assert released["type"] == "keyUp"
+    assert "text" not in released and "unmodifiedText" not in released
+    shortcut = cdp_key_params(phase="down", key="Enter", modifiers=modifier_mask(ctrl=True))
+    assert shortcut["type"] == "rawKeyDown"
+    assert "text" not in shortcut
     letter = cdp_key_params(phase="down", key="a", modifiers=modifier_mask())
     assert letter.get("text") == "a"
     assert letter.get("type") == "char"

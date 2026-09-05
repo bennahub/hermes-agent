@@ -75,6 +75,10 @@ def cdp_key_params(
         params.update(named)
         if event_type == "keyUp":
             params.pop("text", None)
+        elif key == "Enter" and not (modifiers & (_MOD_CTRL | _MOD_META | _MOD_ALT)):
+            # Native form submission and textarea newlines need Chromium's
+            # character/default-action path, not only a raw keydown event.
+            params.update(text="\r", unmodifiedText="\r")
         elif key != " ":
             params["type"] = "rawKeyDown"
         return params
