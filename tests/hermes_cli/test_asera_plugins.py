@@ -122,6 +122,9 @@ def test_three_google_accounts_are_one_gmail_plugin():
     assert calendar["status"] == "RECONNECT_REQUIRED"
     assert drive["status"] == "RECONNECT_REQUIRED"
     assert "disconnect" not in gmail["actions"]
+    assert gmail["connection_type"] == "google"
+    assert next(p for p in out["plugins"] if p["id"] == "jira")["connection_type"] == "workspace"
+    assert "scope" not in gmail["accounts"][0]
     mapped = resolve_plugin_action("gmail", "disconnect", out["plugins"], account="google_account_2")
     assert mapped["name"] == "google_account_2"
     assert mapped["action"] == "disconnect"

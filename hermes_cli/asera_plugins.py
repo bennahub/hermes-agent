@@ -178,7 +178,6 @@ def _account_row(item, scope="default"):
         "display": item.get("display") or item["id"],
         "badge": item.get("badge") or "",
         "status": status,
-        "scope": scope,
         "reconnect": status == "RECONNECT_REQUIRED",
         "actions": actions,
     }
@@ -247,7 +246,7 @@ def project_plugins(inventory, *, google=None, google_accounts=None):
             "description": spec["description"],
             "category": spec["category"],
             "icon": spec["icon"],
-            "connection_type": spec["connection_type"],
+            "connection_type": "workspace" if spec["connection_type"] == "mcp" else spec["connection_type"],
             "supports_multiple_accounts": bool(spec["supports_multiple_accounts"]),
             "featured": bool(spec.get("featured")),
             "status": status,
@@ -266,12 +265,12 @@ def project_plugins(inventory, *, google=None, google_accounts=None):
             continue
         status = _user_status(entry, token_usable=entry.get("state") in _USABLE_STATES, installed=True)
         plugins.append({
-            "id": f"mcp:{entry['id']}",
+            "id": entry["id"],
             "display_name": entry.get("title") or entry["id"],
             "description": "Connected workspace.",
             "category": "productivity",
             "icon": "puzzlepiece.extension",
-            "connection_type": "mcp",
+            "connection_type": "workspace",
             "supports_multiple_accounts": False,
             "featured": False,
             "status": status,
