@@ -343,7 +343,7 @@ def describe(home):
         return {'client_present':False,'token_present':False,'dependencies_available':False,'requested_scopes':[],'verification':None}
 
 
-def run_operation(scope,owner_id,action,*,value=None,session_id=None,loopback_port=None):
+def run_operation(scope,owner_id,action,*,value=None,session_id=None,loopback_port=None,account=None):
     """Trusted router boundary. Values go through stdin, never shell/argv/logs."""
     import subprocess
     import sys
@@ -353,6 +353,8 @@ def run_operation(scope,owner_id,action,*,value=None,session_id=None,loopback_po
                ';import hermes_cli;hermes_cli.__path__[:0]='+repr(list(hermes_cli.__path__))+
                ';from hermes_cli.google_workspace_worker import main;raise SystemExit(main())')
     data={'scope':scope,'owner_id':owner_id,'action':action,'value':value,'session_id':session_id,'loopback_port':loopback_port}
+    if account:
+        data['account']=account
     encoded=json.dumps(data).encode()
     if len(encoded)>65536:return {'ok':False,'error':'invalid_google_request'}
     env=dict(os.environ);env['HERMES_HOME']=str(get_default_hermes_root())

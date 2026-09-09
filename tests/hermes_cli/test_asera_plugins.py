@@ -90,3 +90,64 @@ def test_resolve_gmail_connect_hides_client_json_action():
     assert mapped == {"kind": "integration", "id": "google-workspace", "scope": "default",
                       "action": "connect"}
     assert "field_id" not in mapped
+
+
+def test_three_google_accounts_are_one_gmail_plugin():
+    accounts = [
+        {"id": "google_account_1", "display": "owner@gmail.com", "badge": "default",
+         "status": "CONNECTED", "scopes": ["https://mail.google.com/"], "primary": True,
+         "reconnect": False},
+        {"id": "google_account_2", "display": "owner@mraia.com.sa", "badge": "mraia",
+         "status": "RECONNECT_REQUIRED",
+         "scopes": ["https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/drive",
+                    "https://www.googleapis.com/auth/gmail.readonly"],
+         "primary": False, "reconnect": True},
+        {"id": "google_account_3", "display": "owner@bennahub.com", "badge": "bennahub",
+         "status": "RECONNECT_REQUIRED",
+         "scopes": ["https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/drive",
+                    "https://www.googleapis.com/auth/gmail.readonly"],
+         "primary": False, "reconnect": True},
+    ]
+    out = project_plugins(_inventory([
+        _row("google-workspace", "integration", "Gmail / Google Workspace", "configured")
+    ]), google={"token_present": True, "client_present": True}, google_accounts=accounts)
+    gmail = next(p for p in out["plugins"] if p["id"] == "gmail")
+    calendar = next(p for p in out["plugins"] if p["id"] == "google-calendar")
+    drive = next(p for p in out["plugins"] if p["id"] == "google-drive")
+    assert gmail["status"] == "CONNECTED"
+    assert [a["badge"] for a in gmail["accounts"]] == ["default", "mraia", "bennahub"]
+    assert out["installed_count"] == 1
+    assert calendar["status"] == "RECONNECT_REQUIRED"
+    assert drive["status"] == "RECONNECT_REQUIRED"
+    assert "disconnect" not in gmail["actions"]
+    mapped = resolve_plugin_action("gmail", "disconnect", out["plugins"], account="google_account_2")
+    assert mapped["name"] == "google_account_2"
+    assert mapped["action"] == "disconnect"
+
+
+def test_transient_google_probe_stays_connected():
+    accounts = [{"id": "google_account_1", "display": "a@b.com", "badge": "default",
+                 "status": "CONNECTED", "scopes": ["https://mail.google.com/"],
+                 "primary": True, "reconnect": False}]
+    out = project_plugins(_inventory([
+        _row("google-workspace", "integration", "Gmail / Google Workspace", "error")
+    ]), google={"token_present": True}, google_accounts=accounts)
+    assert next(p for p in out["plugins"] if p["id"] == "gmail")["status"] == "CONNECTED"
+
+
+def test_named_disconnect_does_not_accept_a_path():
+    plugins = project_plugins(_inventory([
+        _row("google-workspace", "integration", "Gmail", "configured")
+    ]), google={"token_present": True}, google_accounts=[{
+        "id": "google_account_1", "display": "a@b.com", "badge": "default",
+        "status": "CONNECTED", "scopes": ["https://mail.google.com/"],
+        "primary": True, "reconnect": False,
+    }])["plugins"]
+    try:
+        resolve_plugin_action("gmail", "disconnect", plugins, account="../google_token.json")
+    except ValueError as exc:
+        assert str(exc) == "invalid_google_request"
+    else:
+        raise AssertionError("path alias must be rejected")

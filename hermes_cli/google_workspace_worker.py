@@ -14,7 +14,7 @@ from hermes_cli import google_workspace_onboarding as adapter
 def execute(data):
     from hermes_cli.connections import scope_context
     from hermes_cli.config import is_managed
-    if not isinstance(data,dict) or set(data)-{'scope','owner_id','action','value','session_id','loopback_port'}:
+    if not isinstance(data,dict) or set(data)-{'scope','owner_id','action','value','session_id','loopback_port','account'}:
         raise ValueError('invalid_google_request')
     scope=data.get('scope','default')
     if not isinstance(scope,str):raise ValueError('invalid_google_request')
@@ -37,6 +37,16 @@ def execute(data):
             # Owner-authorized Gmail full mail and basic settings; no other Workspace grants.
             from hermes_cli.google_gmail_verification import SCOPES
             native.SCOPES=list(SCOPES)
+            account=data.get('account')
+            if account:
+                from hermes_cli.asera_google_accounts import retarget_native, revoke_named_account
+                retarget_native(native, account, home=credential_root, gmail_scopes=SCOPES)
+                if data.get('action')=='disconnect':
+                    target=revoke_named_account(account, home=credential_root)
+                    if target=='primary':
+                        return adapter.operate(native,'disconnect',scope=scope,owner_id=data.get('owner_id'),
+                                               session_id=data.get('session_id'),value=data.get('value'))
+                    return {'ok': True, 'detail_code': 'disconnected'}
             port=data.get('loopback_port')
             if port is not None:
                 if data.get('action') != 'start' or type(port) is not int or not 1024 <= port <= 65535:

@@ -23,7 +23,8 @@ async def google_workspace_action(data, request):
         raise ValueError("unsupported_action")
     raw = await asyncio.to_thread(run_operation, data["scope"], owner, action,
                                   value=data.get("value"), session_id=data.get("session_id"),
-                                  loopback_port=data.get("loopback_port"))
+                                  loopback_port=data.get("loopback_port"),
+                                  account=data.get("name"))
     if raw.get("ok") is not True:
         code = raw.get("error", "connection_action_failed")
         if action == "test" and code != "google_operation_busy":

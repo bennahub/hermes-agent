@@ -148,9 +148,12 @@ async def plugins_action(request: Request):
         action = body.get("action")
         if not isinstance(plugin_id, str) or not isinstance(action, str):
             raise ValueError("invalid_request")
-        extra = {k: body[k] for k in ("session_id", "value", "loopback_port") if k in body}
+        extra = {k: body[k] for k in ("session_id", "value", "loopback_port", "account") if k in body}
+        account = extra.pop("account", None)
+        if account is not None and (not isinstance(account, str) or len(account) > 64):
+            raise ValueError("invalid_request")
         index = await asyncio.to_thread(build_plugin_index, _build_oauth_catalog())
-        mapped = resolve_plugin_action(plugin_id, action, index["plugins"])
+        mapped = resolve_plugin_action(plugin_id, action, index["plugins"], account=account)
         mapped.update(extra)
         return await dispatch(parse_action(mapped), request)
     except HTTPException:

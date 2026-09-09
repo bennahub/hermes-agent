@@ -7,6 +7,13 @@ onto four user statuses. Diagnostics keep reading ``/api/connections``.
 """
 from __future__ import annotations
 
+from hermes_cli.asera_google_accounts import (
+    ALIAS_RE,
+    default_secrets_root,
+    load_google_accounts,
+    next_alias,
+    scopes_cover,
+)
 from hermes_cli.connections import build_inventory
 
 
@@ -27,10 +34,7 @@ CATALOG = (
         "source_kind": "integration",
         "source_id": "google-workspace",
         "service": "gmail",
-        "required_scopes": (
-            "https://mail.google.com/",
-            "https://www.googleapis.com/auth/gmail.settings.basic",
-        ),
+        "required_scopes": ("https://mail.google.com/",),
     },
     {
         "id": "google-calendar",
@@ -97,34 +101,19 @@ _INSTALLED_MCP = frozenset({"configured", "connected", "needs_auth", "disabled",
 
 
 def _google_identity(home=None):
-    """Email on the stored Google token, never the token itself."""
+    """Admin client presence plus the primary token. Accounts come from the store."""
     try:
-        from hermes_cli.google_workspace_onboarding import describe, credential_module
+        from hermes_cli.google_workspace_onboarding import describe
         from hermes_constants import get_default_hermes_root
         from pathlib import Path
-        import json
         root = Path(home) if home is not None else Path(get_default_hermes_root())
         info = describe(root)
-        store = credential_module()
-        path = store.token_path(root, get_default_hermes_root())
-        account = None
-        if path.is_file() and not path.is_symlink() and path.stat().st_size < 65536:
-            payload = json.loads(path.read_text())
-            for candidate in (payload.get("account"), (payload.get("_hermes_gmail_verification") or {}).get("account")):
-                if isinstance(candidate, str) and "@" in candidate and len(candidate) < 256:
-                    account = candidate
-                    break
-            scopes = payload.get("scopes") or []
-            if isinstance(scopes, str):
-                scopes = scopes.split()
-        else:
-            scopes = []
         return {
-            "client_present": bool(info.get("client_present")),
+            "client_present": bool(info.get("client_present") or default_secrets_root() is not None),
             "token_present": bool(info.get("token_present")),
             "verification": info.get("verification"),
-            "account": account,
-            "scopes": list(scopes) if isinstance(scopes, (list, tuple)) else [],
+            "account": None,
+            "scopes": [],
             "refreshable": bool(info.get("token_present")),
         }
     except Exception:
@@ -165,53 +154,81 @@ def _account(label, status, *, scope="default", reconnect=False):
     return {"id": label, "display": label, "status": status, "scope": scope, "reconnect": reconnect}
 
 
-def _plugin_actions(status, spec):
+def _plugin_actions(status, spec, *, account_count=0):
     if status == "NOT_INSTALLED":
         return ["add"]
     if status == "NEEDS_SIGN_IN":
         return ["connect"]
     if status == "RECONNECT_REQUIRED":
-        return ["reconnect", "disconnect"]
-    actions = ["disconnect"]
+        return ["reconnect"] if account_count > 1 else ["reconnect", "disconnect"]
+    actions = []
+    if account_count <= 1:
+        actions.append("disconnect")
     if spec.get("supports_multiple_accounts"):
         actions.append("add_account")
-    return actions
+    return actions or ["disconnect"]
 
 
-def _scopes_cover(granted, required):
-    if not required:
-        return True
-    have = {str(s) for s in granted}
-    return set(required).issubset(have)
+def _account_row(item, scope="default"):
+    status = item["status"]
+    actions = ["reconnect", "disconnect"] if status == "RECONNECT_REQUIRED" else (
+        ["connect"] if status == "NEEDS_SIGN_IN" else ["disconnect"])
+    return {
+        "id": item["id"],
+        "display": item.get("display") or item["id"],
+        "badge": item.get("badge") or "",
+        "status": status,
+        "scope": scope,
+        "reconnect": status == "RECONNECT_REQUIRED",
+        "actions": actions,
+    }
 
 
-def project_plugins(inventory, *, google=None):
+def _google_plugin_state(spec, entry, google, google_accounts):
+    required = spec.get("required_scopes") or ()
+    service = spec.get("service")
+    if spec["id"] == "gmail":
+        scoped = list(google_accounts)
+    else:
+        scoped = [item for item in google_accounts
+                  if scopes_cover(item.get("scopes") or [], required, service=service)]
+    connected = [item for item in scoped if item["status"] == "CONNECTED"]
+    reconnect = [item for item in scoped if item["status"] == "RECONNECT_REQUIRED"]
+    if connected:
+        status = "CONNECTED"
+    elif reconnect:
+        status = "RECONNECT_REQUIRED"
+    else:
+        token_usable = bool(google.get("token_present") or google.get("refreshable")
+                            or (entry and entry.get("state") in _USABLE_STATES))
+        if entry and entry.get("owner_action") == "reauthorize":
+            status = "RECONNECT_REQUIRED"
+        elif spec["id"] == "gmail" and token_usable:
+            status = "CONNECTED"
+        elif token_usable and spec["id"] != "gmail":
+            status = "NEEDS_SIGN_IN"
+        else:
+            status = _user_status(entry, token_usable=False, installed=True, service_ready=False)
+    accounts = [_account_row(item, scope=(entry or {}).get("scope") or "default") for item in scoped]
+    if spec["id"] == "gmail" and not accounts and google.get("account"):
+        accounts = [_account_row({
+            "id": google["account"], "display": google["account"], "badge": "",
+            "status": status, "reconnect": status == "RECONNECT_REQUIRED",
+        }, scope=(entry or {}).get("scope") or "default")]
+    return status, accounts
+
+
+def project_plugins(inventory, *, google=None, google_accounts=None):
     """Fold a Connections inventory into owner-facing plugins."""
     entries = list(inventory.get("entries") or [])
     google = google or {}
+    google_accounts = list(google_accounts or [])
     plugins = []
     for spec in CATALOG:
         rows = _primary_rows(entries, spec["source_kind"], spec["source_id"])
         entry = rows[0] if rows else None
         if spec["connection_type"] == "google":
-            token_usable = bool(google.get("token_present") or google.get("refreshable")
-                                or google.get("verification") or (entry and entry.get("state") in _USABLE_STATES))
-            # A missing 24h receipt is not Reconnect. Transient verify gaps stay Connected.
-            if entry and entry.get("owner_action") == "reauthorize":
-                token_usable = False
-            installed = True
-            service_ready = _scopes_cover(google.get("scopes") or [], spec.get("required_scopes") or ())
-            if spec["id"] == "gmail":
-                # Gmail is the live Google grant. Token present ⇒ service ready
-                # even when the receipt cache is empty.
-                service_ready = service_ready or token_usable
-            status = _user_status(entry, token_usable=token_usable, installed=installed,
-                                  service_ready=service_ready)
-            accounts = []
-            label = google.get("account")
-            if label and status in ("CONNECTED", "RECONNECT_REQUIRED"):
-                accounts.append(_account(label, status, scope=(entry or {}).get("scope") or "default",
-                                         reconnect=status == "RECONNECT_REQUIRED"))
+            status, accounts = _google_plugin_state(spec, entry, google, google_accounts)
         elif spec["source_kind"] == "mcp":
             installed = bool(entry) and entry.get("state") in _INSTALLED_MCP
             token_usable = bool(entry) and entry.get("state") in _USABLE_STATES
@@ -235,7 +252,7 @@ def project_plugins(inventory, *, google=None):
             "featured": bool(spec.get("featured")),
             "status": status,
             "accounts": accounts,
-            "actions": _plugin_actions(status, spec),
+            "actions": _plugin_actions(status, spec, account_count=len(accounts)),
             "source": {"kind": spec["source_kind"], "id": spec["source_id"],
                        "scope": (entry or {}).get("scope") or "default"},
         })
@@ -272,18 +289,35 @@ def project_plugins(inventory, *, google=None):
     }
 
 
-def build_plugin_index(oauth_catalog, *, home=None):
+def build_plugin_index(oauth_catalog, *, home=None, secrets_root=None):
+    from hermes_constants import get_default_hermes_root
+    from pathlib import Path
+    root = Path(home) if home is not None else Path(get_default_hermes_root())
     inventory = build_inventory(oauth_catalog)
-    return project_plugins(inventory, google=_google_identity(home))
+    return project_plugins(
+        inventory,
+        google=_google_identity(root),
+        google_accounts=load_google_accounts(root, secrets_root=secrets_root),
+    )
 
 
-def resolve_plugin_action(plugin_id, action, plugins):
+def resolve_plugin_action(plugin_id, action, plugins, account=None):
     """Map a plugin action onto the existing Connections action tuple."""
+    from hermes_cli.asera_google_accounts import validate_alias
     plugin = next((p for p in plugins if p["id"] == plugin_id), None)
     if plugin is None:
         raise ValueError("unknown_plugin")
-    if action not in plugin["actions"] and action not in ("auth_poll", "auth_cancel", "auth_submit"):
+    allowed = set(plugin["actions"])
+    for row in plugin.get("accounts") or []:
+        allowed.update(row.get("actions") or [])
+    if action not in allowed and action not in ("auth_poll", "auth_cancel", "auth_submit"):
         raise ValueError("unsupported_action")
+    if action == "disconnect" and not account and len(plugin.get("accounts") or []) > 1:
+        raise ValueError("unsupported_action")
+    if not account and action in ("reconnect", "connect", "disconnect"):
+        match = next((row for row in plugin.get("accounts") or [] if action in (row.get("actions") or [])), None)
+        if match and ALIAS_RE.fullmatch(str(match["id"])):
+            account = match["id"]
     source = plugin["source"]
     mapped = {"add": "connect", "add_account": "connect", "connect": "connect",
               "reconnect": "reconnect" if source["kind"] != "integration" or source["id"] != "google-workspace"
@@ -291,5 +325,12 @@ def resolve_plugin_action(plugin_id, action, plugins):
               "disconnect": "disconnect"}.get(action, action)
     if source["kind"] == "mcp" and action == "add":
         mapped = "install"
-    return {"kind": source["kind"], "id": source["id"], "scope": source.get("scope") or "default",
-            "action": mapped}
+    result = {"kind": source["kind"], "id": source["id"], "scope": source.get("scope") or "default",
+              "action": mapped}
+    if account:
+        result["name"] = validate_alias(account)
+    elif action == "add_account" and plugin.get("connection_type") == "google":
+        root = default_secrets_root()
+        if root is not None:
+            result["name"] = next_alias(root)
+    return result

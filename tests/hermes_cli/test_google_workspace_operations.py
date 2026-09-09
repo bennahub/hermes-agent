@@ -205,6 +205,15 @@ class NativeGoogleTests(unittest.TestCase):
         self.assertTrue(adapter.describe(self.home/'profiles/two')['shared'])
         self.assertFalse((self.home/'profiles/two/google_token.json').exists())
 
+    def test_account_alias_cannot_be_a_path(self):
+        with self.assertRaisesRegex(ValueError, "invalid_google_request"):
+            worker.execute({"scope": "one", "owner_id": "owner-a", "action": "disconnect",
+                            "account": "../google_token.json"})
+        with self.assertRaisesRegex(ValueError, "invalid_google_request"):
+            worker.execute({"scope": "one", "owner_id": "owner-a", "action": "start",
+                            "account": "google_account_2"})
+
+
 class IsolatedWorkerBoundaryTests(unittest.TestCase):
     setUp=NativeGoogleTests.setUp
     def test_stdin_worker_uses_actual_scoped_native_store(self):
