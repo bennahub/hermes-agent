@@ -16,7 +16,8 @@ async def google_workspace_action(data, request):
     else:
         raise HTTPException(401, "authentication_required")
     actions = {"save_credential":"save_client", "connect":"start", "auth_poll":"poll",
-               "auth_submit":"submit", "auth_cancel":"cancel", "test":"test"}
+               "auth_submit":"submit", "auth_cancel":"cancel", "test":"test",
+               "disconnect":"disconnect"}
     action = actions.get(data["action"])
     if action is None or (action == "save_client" and data.get("field_id") != "google_client_secret_json"):
         raise ValueError("unsupported_action")
@@ -35,8 +36,9 @@ async def google_workspace_action(data, request):
         return result(detail_code="check_passed", state="connected", last_checked_at=time.time(),
                       account=raw.get("account"),
                       refresh_verified=True, gmail_verified=True)
-    if action in {"save_client", "cancel"}:
-        return result(detail_code="saved" if action == "save_client" else "cancelled")
+    if action in {"save_client", "cancel", "disconnect"}:
+        return result(detail_code="disconnected" if action == "disconnect" else
+                      ("saved" if action == "save_client" else "cancelled"))
     # A poll acquires the operation lock. An exchanging marker surviving that
     # lock means the previous worker stopped with an uncertain token exchange.
     status = {"completed":"approved", "exchanging":"error", "failed":"error"}.get(raw.get("status"), raw.get("status", "pending"))

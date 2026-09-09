@@ -206,6 +206,18 @@ def operate(native, action, *, scope, owner_id, session_id=None, value=None, now
         except Exception as exc:
             code=str(exc) if isinstance(exc,ValueError) and str(exc) in ERRORS else 'google_verification_failed'
             raise ValueError(code) from None
+    if action=='disconnect':
+        # Revoke the stored grant and delete only the token. The admin OAuth
+        # client stays; other Google accounts are not touched because this
+        # store is one token file.
+        token=Path(native.TOKEN_PATH)
+        if token.is_symlink():
+            raise ValueError('invalid_google_store')
+        try:
+            native.revoke()
+        except Exception:
+            token.unlink(missing_ok=True)
+        return {'ok': True, 'detail_code': 'disconnected'}
     if action=='status':
         result=status(Path(native.CLIENT_SECRET_PATH).parent)
         result['pending']=bool(isinstance(meta,dict) and meta.get('expires_at',0)>now and meta.get('status')=='pending')

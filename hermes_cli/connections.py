@@ -321,7 +321,8 @@ def build_inventory(oauth_catalog):
                 "connected" if google["verification"] else "configured" if google["token_present"] else "needs_auth" if configured else "needs_configuration",
                 scope["id"], auth_type="manual_code", scope_kind="GLOBAL_SHARED" if google.get("shared") or scope["id"] == "default" else "PROFILE_SPECIFIC",
                 actions=["save_credential"] + (["connect"] if configured and google["dependencies_available"] else [])
-                    + (["test"] if google["token_present"] and google["dependencies_available"] else []),
+                    + (["test"] if google["token_present"] and google["dependencies_available"] else [])
+                    + (["disconnect"] if google["token_present"] else []),
                 fields=[{"id":"google_client_secret_json", "title":"Google OAuth client JSON",
                          "secret":True, "required":not configured, "format":"json", "multiline":True}],
                 requested_scopes=google["requested_scopes"],

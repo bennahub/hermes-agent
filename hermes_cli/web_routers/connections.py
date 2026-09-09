@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from hermes_cli.connections import build_inventory, scope_context
 from hermes_cli.connections_google import google_workspace_action
+from hermes_cli.asera_plugins import build_plugin_index, resolve_plugin_action
 from hermes_cli.web_deps import late
 
 router = APIRouter()
@@ -119,6 +120,45 @@ async def connections_inventory(request: Request):
     except Exception:
         # Never reflect exception text: native errors can include config/URLs.
         raise HTTPException(503,detail="connections_unavailable") from None
+
+
+@router.get("/api/plugins")
+async def plugins_index(request: Request):
+    """Owner-facing plugin list. Same credentials as Connections; different fold."""
+    _require_token(request)
+    try:
+        return await asyncio.to_thread(build_plugin_index, _build_oauth_catalog())
+    except Exception:
+        raise HTTPException(503, detail="plugins_unavailable") from None
+
+
+@router.post("/api/plugins/actions")
+async def plugins_action(request: Request):
+    """Translate a plugin action onto the existing Connections dispatcher."""
+    _require_token(request)
+    try:
+        raw = await request.body()
+        if len(raw) > 128 * 1024:
+            raise ValueError("invalid_request")
+        import json
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("invalid_request")
+        plugin_id = body.get("plugin")
+        action = body.get("action")
+        if not isinstance(plugin_id, str) or not isinstance(action, str):
+            raise ValueError("invalid_request")
+        extra = {k: body[k] for k in ("session_id", "value", "loopback_port") if k in body}
+        index = await asyncio.to_thread(build_plugin_index, _build_oauth_catalog())
+        mapped = resolve_plugin_action(plugin_id, action, index["plugins"])
+        mapped.update(extra)
+        return await dispatch(parse_action(mapped), request)
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(400, detail="invalid_plugin_request") from None
+    except Exception:
+        return result(False, detail_code="connection_action_failed")
 
 
 @router.post("/api/connections/actions")
