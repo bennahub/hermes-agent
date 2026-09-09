@@ -36,10 +36,11 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from _hermes_home import get_hermes_home
+from _hermes_home import get_hermes_home, get_default_hermes_root
 
 HERMES_HOME = get_hermes_home()
-TOKEN_PATH = HERMES_HOME / "google_token.json"
+from _google_credentials import token_path, credential_lock, write_token
+TOKEN_PATH = token_path(HERMES_HOME, get_default_hermes_root())
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
 
 SCOPES = [
@@ -69,14 +70,11 @@ def _ensure_authenticated():
 
 
 def _stored_token_scopes() -> list[str]:
-    try:
-        data = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return list(SCOPES)
-    scopes = data.get("scopes")
-    if isinstance(scopes, list) and scopes:
-        return scopes
-    return list(SCOPES)
+    data=json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+    scopes=data.get("scopes")
+    if not isinstance(scopes,list) or not scopes or not all(isinstance(s,str) for s in scopes):
+        raise ValueError("google_granted_scopes_missing")
+    return scopes
 
 
 def _gws_binary() -> str | None:
@@ -92,7 +90,7 @@ def _gws_env() -> dict[str, str]:
     return env
 
 
-def _run_gws(parts: list[str], *, params: dict | None = None, body: dict | None = None):
+def _run_gws_locked(parts: list[str], *, params: dict | None = None, body: dict | None = None):
     binary = _gws_binary()
     if not binary:
         raise RuntimeError("gws not installed")
@@ -126,6 +124,11 @@ def _run_gws(parts: list[str], *, params: dict | None = None, body: dict | None 
         print("ERROR: Unexpected non-JSON output from gws:", file=sys.stderr)
         print(stdout, file=sys.stderr)
         sys.exit(1)
+
+
+def _run_gws(parts, *, params=None, body=None):
+    with credential_lock(TOKEN_PATH.parent):
+        return _run_gws_locked(parts, params=params, body=body)
 
 
 def _headers_dict(msg: dict) -> dict[str, str]:
@@ -178,7 +181,7 @@ def _datetime_with_timezone(value: str) -> str:
     return value + "Z"
 
 
-def get_credentials():
+def _get_credentials_locked():
     """Load and refresh credentials from token file."""
     _ensure_authenticated()
 
@@ -188,16 +191,19 @@ def get_credentials():
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), _stored_token_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        TOKEN_PATH.write_text(
-            json.dumps(
-                _normalize_authorized_user_payload(json.loads(creds.to_json())),
-                indent=2,
-            ), encoding="utf-8"
-        )
+        payload=_normalize_authorized_user_payload(json.loads(creds.to_json()))
+        if creds.granted_scopes is not None:
+            payload["scopes"]=list(creds.granted_scopes)
+        write_token(TOKEN_PATH, payload)
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
         sys.exit(1)
     return creds
+
+
+def get_credentials():
+    with credential_lock(TOKEN_PATH.parent):
+        return _get_credentials_locked()
 
 
 def build_service(api, version):
@@ -209,6 +215,65 @@ def build_service(api, version):
 # =========================================================================
 # Gmail
 # =========================================================================
+
+
+# Gmail API operations available to a consumer mailbox. Workspace-only delegate,
+# forwarding-address creation and send-as verification are deliberately absent.
+GMAIL_METHODS = {
+    "messages": {"list", "get", "send", "insert", "import", "modify", "batchModify", "trash", "untrash", "delete", "batchDelete"},
+    "messages.attachments": {"get"},
+    "drafts": {"list", "get", "create", "update", "delete", "send"},
+    "threads": {"list", "get", "modify", "trash", "untrash", "delete"},
+    "labels": {"list", "get", "create", "update", "patch", "delete"},
+    "history": {"list"},
+    "settings": {"getVacation", "updateVacation", "getImap", "updateImap", "getPop", "updatePop", "getLanguage", "updateLanguage", "getAutoForwarding"},
+    "settings.filters": {"list", "get", "create", "delete"},
+    "settings.sendAs": {"list", "get", "patch", "update"},
+    "settings.forwardingAddresses": {"list", "get"},
+}
+
+
+def gmail_auth_status(args):
+    from _google_credentials import credential_home
+    present=TOKEN_PATH.is_file()
+    print(json.dumps({"credential_present":present,
+        "scope_kind":"GLOBAL_SHARED" if credential_home(HERMES_HOME,get_default_hermes_root())!=HERMES_HOME or HERMES_HOME==get_default_hermes_root() else "PROFILE_SPECIFIC",
+        "granted_scopes":_stored_token_scopes() if present else [],
+        "account_verified":False}))  # Offline presence is not a new provider check.
+
+
+def gmail_api(args):
+    """Use Gmail's discovery contract without arbitrary URL or cross-service access."""
+    resource = args.resource.split(".")
+    if args.method not in GMAIL_METHODS.get(args.resource, ()):
+        raise ValueError("invalid_gmail_operation")
+    params = json.loads(args.params)
+    body = json.loads(args.body) if args.body is not None else None
+    if not isinstance(params, dict) or (body is not None and not isinstance(body, dict)):
+        raise ValueError("invalid_gmail_parameters")
+    # Current account only; selecting another mailbox is not delegated authority.
+    if params.get("userId", "me") != "me":
+        raise ValueError("invalid_gmail_account")
+    params["userId"] = "me"
+    target = build_service("gmail", "v1").users()
+    for part in resource:
+        if part not in target._resourceDesc.get("resources", {}):
+            raise ValueError("unsupported_gmail_resource")
+        target = getattr(target, part)()
+    definition = target._resourceDesc.get("methods", {}).get(args.method)
+    if definition is None:
+        raise ValueError("unsupported_gmail_method")
+    # Discovery's method parameters exclude transport headers, URL overrides,
+    # access_token/key injection and arbitrary SDK kwargs (e.g. media upload).
+    if (set(params) - set(definition.get("parameters", {}))
+            or set(params) & {"access_token", "oauth_token", "key", "uploadType", "upload_protocol", "callback"}):
+        raise ValueError("invalid_gmail_parameters")
+    if body is not None:
+        if "request" not in definition:
+            raise ValueError("invalid_gmail_body")
+        params["body"] = body
+    result = getattr(target, args.method)(**params).execute()
+    print(json.dumps(result or {}, indent=2, ensure_ascii=False))
 
 
 def gmail_search(args):
@@ -1092,6 +1157,16 @@ def main():
     p.add_argument("--add-labels", default="", help="Comma-separated label IDs to add")
     p.add_argument("--remove-labels", default="", help="Comma-separated label IDs to remove")
     p.set_defaults(func=gmail_modify)
+
+    p = gmail_sub.add_parser("auth-status", help="Offline credential source and actual stored scopes; no secret output")
+    p.set_defaults(func=gmail_auth_status)
+
+    p = gmail_sub.add_parser("api", help="Native Gmail API operation; no other Google service")
+    p.add_argument("resource", help="Gmail resource under users, e.g. messages or settings.filters")
+    p.add_argument("method", help="Native method, e.g. trash, delete, create, update, list")
+    p.add_argument("--params", default="{}", help="Native method parameters as JSON")
+    p.add_argument("--body", default=None, help="Native request body as JSON")
+    p.set_defaults(func=gmail_api)
 
     # --- Calendar ---
     cal = sub.add_parser("calendar")

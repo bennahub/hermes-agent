@@ -470,3 +470,62 @@ class TestAcquireSingleFlight:
         assert len(opened) >= 1
         registry.release(results[0])
         registry.release(results[1])
+
+
+class TestReleaseAllUnder:
+    """A profile delete has to break handles this process is holding into the deleted tree.
+
+    ``release`` is refcount-driven, and the holder that matters cannot be seen from outside:
+    ``tui_gateway.compute_host`` runs another profile's turn INSIDE the gateway that is
+    servicing ``profiles.delete``, so the PID sweeps skip it as "ourselves".
+    """
+
+    def test_closes_handles_under_the_directory_regardless_of_refcount(self, tmp_path):
+        home = tmp_path / "profiles" / "faisal"
+        home.mkdir(parents=True)
+        db = registry.acquire(home / "state.db")
+        registry.acquire(home / "state.db")  # a second live holder
+        assert registry.stats()["total_refcounts"] == 2
+
+        assert registry.release_all_under(home) == 1
+
+        assert registry.stats()["live_generations"] == 0
+        assert db not in registry.live_shared_session_dbs()
+
+    def test_leaves_every_other_profiles_handle_open(self, tmp_path):
+        doomed = tmp_path / "profiles" / "faisal"
+        keeper = tmp_path / "profiles" / "majed"
+        doomed.mkdir(parents=True)
+        keeper.mkdir(parents=True)
+        registry.acquire(doomed / "state.db")
+        kept = registry.acquire(keeper / "state.db")
+
+        assert registry.release_all_under(doomed) == 1
+
+        assert registry.live_shared_session_dbs() == [kept]
+
+    def test_is_a_no_op_in_a_process_holding_none(self, tmp_path):
+        assert registry.release_all_under(tmp_path / "profiles" / "nobody") == 0
+
+    def test_a_sibling_name_sharing_a_prefix_is_not_swept(self, tmp_path):
+        """``profiles/faisal`` must not take ``profiles/faisal-backup`` with it."""
+        (tmp_path / "faisal").mkdir(parents=True)
+        (tmp_path / "faisal-backup").mkdir(parents=True)
+        registry.acquire(tmp_path / "faisal" / "state.db")
+        sibling = registry.acquire(tmp_path / "faisal-backup" / "state.db")
+
+        assert registry.release_all_under(tmp_path / "faisal") == 1
+
+        assert registry.live_shared_session_dbs() == [sibling]
+
+    def test_a_released_handle_releases_cleanly_afterwards(self, tmp_path):
+        """The stale holder's own release must not raise or resurrect a registry entry."""
+        home = tmp_path / "profiles" / "faisal"
+        home.mkdir(parents=True)
+        db = registry.acquire(home / "state.db")
+
+        registry.release_all_under(home)
+
+        registry.release_or_close(db)
+        assert registry.stats() == {
+            "live_generations": 0, "retired_generations": 0, "total_refcounts": 0}

@@ -54,15 +54,18 @@ Blunt instruments: `web.cache_ttl_minutes: 1` (min) or
 3. Load explicitly: `hermes -s name` (or the skill's own `/<name>` slash command)
 
 ### Gateway issues
+Hosted Hermes health is `hermes runtime --json` (canonical VPS release). Do not use this machine, an Agent Computer checkout, or `systemctl --user` as Hermes truth — a missing user bus is not "gateway down".
+
 Check logs first:
 ```bash
+hermes runtime --json
 grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
 ```
 
 Common gateway problems:
 - **Gateway dies on SSH logout**: Enable linger: `sudo loginctl enable-linger $USER`
 - **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf` for systemd services to work. Without it, gateway falls back to `nohup` (dies when session closes).
-- **Gateway crash loop**: Reset the failed state: `systemctl --user reset-failed hermes-gateway`
+- **Gateway crash loop** (user-unit installs only): `systemctl --user reset-failed hermes-gateway`
 
 ### Platform-specific issues
 - **Discord bot silent**: Must enable **Message Content Intent** in Bot → Privileged Gateway Intents.

@@ -26,21 +26,41 @@ import pytest
 @pytest.fixture(autouse=True)
 def _fast_retry_backoff(monkeypatch):
     """Short-circuit retry backoff for all tests in this directory."""
-    try:
-        import run_agent
-    except ImportError:
-        return
+    # The agent.turn_* retry paths import ``jittered_backoff`` lazily from
+    # ``agent.retry_utils``; patch it there so rate-limit / invalid-response /
+    # server-error retries don't burn real wall-clock seconds.
+    from agent import retry_utils as _retry_utils
+    monkeypatch.setattr(_retry_utils, "jittered_backoff", lambda *a, **k: 0.0)
 
-    monkeypatch.setattr(run_agent, "jittered_backoff", lambda *a, **k: 0.0)
-    # The conversation loop was extracted out of run_agent.py into
-    # ``agent.conversation_loop``, which imports ``jittered_backoff``
-    # directly (``from agent.retry_utils import jittered_backoff``).
-    # Patching ``run_agent.jittered_backoff`` alone misses every retry
-    # path under the new module — tests that exercise rate-limit /
-    # invalid-response / server-error retries burn real wall-clock
-    # seconds per retry. Patch both for full coverage.
-    try:
-        from agent import conversation_loop as _conv_loop
-        monkeypatch.setattr(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0)
-    except ImportError:
-        pass
+
+@pytest.fixture()
+def scoped_test_ingress(tmp_path, monkeypatch):
+    """Opt-in real original-source ingress; only auxiliary policy responses are offline."""
+    import json
+    from types import SimpleNamespace
+    from hermes_state import SessionDB
+    from tools.owner_task_authority import mint_execution_source
+    databases = []
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    def install(agent):
+        db = SessionDB(tmp_path / 'state.db')
+        databases.append(db)
+        agent._session_db = db
+        def stage(instruction, calls):
+            assert mint_execution_source(agent, instruction)
+            allowed = [{'tool': name, 'arguments': arguments} for name, arguments in calls]
+            def policy(**kwargs):
+                assert kwargs['task'] == 'execution_scope'
+                payload = json.loads(kwargs['messages'][-1]['content'])
+                if 'invocation' not in payload:
+                    assert payload['original_instruction'] == instruction
+                    result = {'objective': instruction, 'permitted': [instruction], 'excluded': ['Unrelated tasks']}
+                else:
+                    assert payload['original_instruction'] == instruction
+                    result = {'allowed': payload['invocation'] in allowed, 'reason': 'Exact configured test action'}
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(result)))])
+            monkeypatch.setattr('agent.auxiliary_client.call_llm', policy)
+        agent._test_execution_request = stage
+    yield install
+    for db in databases:
+        db.close()

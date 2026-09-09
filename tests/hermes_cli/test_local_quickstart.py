@@ -18,6 +18,15 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
+def servable_catalog(monkeypatch):
+    """Lifecycle sequencing is independent of the runner's physical RAM/engine."""
+    from hermes_cli.local_runtime.catalog import VariantChoice
+    monkeypatch.setattr("hermes_cli.local_runtime.catalog.select_variant",
+        lambda entry, budget: VariantChoice(variant=entry.variants[0], zero_spill=True, reason_key="best-fits"))
+    monkeypatch.setattr("hermes_cli.web_routers.local_models._engine_too_old", lambda min_engine: False)
+
+
+@pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     from hermes_cli import web_server
@@ -52,7 +61,7 @@ def test_quickstart_refuses_when_nothing_fits(client, monkeypatch):
     assert "Local Models" in r.json()["detail"]
 
 
-def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
+def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path, servable_catalog):
     """Fresh machine: install runtime -> download recommended -> activate.
     Each leg is asserted by its observable call, in order."""
     calls: list[str] = []
@@ -80,11 +89,9 @@ def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
         lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
-    from hermes_cli import web_deps
-
     monkeypatch.setattr(
-        web_deps, "late",
-        lambda name: (lambda *a, **k: calls.append("assign")))
+        "hermes_cli.web_server_config._apply_model_assignment_sync",
+        lambda *a, **k: calls.append("assign"))
 
     r = client.post("/api/local-models/quickstart", json={})
     assert r.status_code == 200
@@ -107,7 +114,7 @@ def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
     assert load_config()["local_runtime"]["enabled"] is True
 
 
-def test_quickstart_skips_satisfied_legs(client, monkeypatch):
+def test_quickstart_skips_satisfied_legs(client, monkeypatch, servable_catalog):
     """Runtime present and model already staged: the response says so and
     the job goes straight to activation."""
     calls: list[str] = []
@@ -133,11 +140,9 @@ def test_quickstart_skips_satisfied_legs(client, monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
         lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
-    from hermes_cli import web_deps
-
     monkeypatch.setattr(
-        web_deps, "late",
-        lambda name: (lambda *a, **k: calls.append("assign")))
+        "hermes_cli.web_server_config._apply_model_assignment_sync",
+        lambda *a, **k: calls.append("assign"))
 
     r = client.post("/api/local-models/quickstart", json={})
     assert r.status_code == 200
@@ -185,3 +190,17 @@ def test_quickstart_is_single_flight(client, quickstart_ready, monkeypatch):
         assert "already running" in r.json()["detail"].lower()
     finally:
         lm._QUICKSTART_LOCK.release()
+
+
+def test_assign_default_reaches_model_assignment(monkeypatch):
+    """late() must resolve _apply_model_assignment_sync on web_server_config, the
+    sibling that defines it. Only the leaf is stubbed; the default web_server lookup
+    raised AttributeError at the quickstart's 'making it your default' step."""
+    import hermes_cli.web_routers.local_models as lm
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        "hermes_cli.web_server_config._apply_model_assignment_sync",
+        lambda *a, **k: seen.append(a))
+    lm._assign_default({}, "some-model")
+    assert seen == [("main", "llamacpp", "some-model", "", "", "")]

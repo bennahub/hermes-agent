@@ -559,7 +559,10 @@ def test_busy_submit_claims_attached_image_for_queued_turn(monkeypatch):
     assert redirected == []
     assert not interrupted.wait(0.1)
     assert session["attached_images"] == []
-    assert session["queued_prompt"] == {
+    # The envelope also carries an owner-task nonce (stamped so the drained turn
+    # binds exactly this mint); it is orthogonal to attachment handling here.
+    queued = {k: v for k, v in session["queued_prompt"].items() if k != "owner_task_nonce"}
+    assert queued == {
         "text": "is this B?",
         "image_paths": ["/tmp/b.png"],
         "transport": None,
@@ -588,7 +591,11 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
         server._methods["prompt.submit"]("c", {"session_id": "sid", "text": "C"})
 
         assert session["queued_prompt"]["image_paths"] == ["/tmp/b.png"]
-        assert session["queued_prompts"] == [
+        queued_c = [
+            {k: v for k, v in env.items() if k != "owner_task_nonce"}
+            for env in session["queued_prompts"]
+        ]
+        assert queued_c == [
             {"text": "C", "image_paths": ["/tmp/c.png"], "transport": None}
         ]
 
@@ -599,7 +606,13 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
     finally:
         server._sessions.pop("sid", None)
 
-    assert dispatched == [
+    # Each drained turn also carries its own owner-task nonce; strip it here,
+    # this test is about attachment order, not authority.
+    dispatched_clean = [
+        (rid, sid, text, {k: v for k, v in kw.items() if k != "owner_task_nonce"})
+        for rid, sid, text, kw in dispatched
+    ]
+    assert dispatched_clean == [
         (
             "drain-b",
             "sid",

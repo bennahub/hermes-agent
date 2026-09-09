@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import hermes_cli.update_receipt as ur
+from hermes_cli import update_cmd
 
 
 @pytest.fixture()
@@ -217,7 +218,7 @@ class TestCommandBoundaryFinalization:
             ur.record_step("windows_preflight", False, "hermes.exe holds venv")
             sys.exit(2)
 
-        monkeypatch.setattr(hermes_main, "_cmd_update_impl", _fake_impl)
+        monkeypatch.setattr(update_cmd, "_cmd_update_impl", _fake_impl)
         monkeypatch.setattr(
             hermes_main, "detect_install_method", lambda *a, **k: "git", raising=False
         )
@@ -389,7 +390,7 @@ class TestCodeIdentity:
         # Running from a git checkout in CI/dev: sha resolves via git.
         if identity["sha"]:
             assert identity["short_sha"] == identity["sha"][:8]
-            assert identity["source"] in ("git", "build-file")
+            assert identity["source"] in ("git", "build-file", "runtime-identity")
 
     def test_get_code_identity_cached(self):
         from hermes_cli.build_info import get_code_identity

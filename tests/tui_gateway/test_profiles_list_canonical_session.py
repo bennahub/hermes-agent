@@ -133,6 +133,23 @@ def test_canonical_session_resolves_hidden_row(home):
     assert row["last_session"]["id"] == "visible1"
 
 
+@pytest.mark.parametrize("display_kind", ["hidden", "async_delegation_complete", "auto_continue", "model_switch"])
+def test_canonical_preview_skips_internal_display_rows(home, display_kind):
+    db = _db(home)
+    _add_session(db, "forever1", title="Bot Chat", ts=1000, text="last visible reply")
+    db.append_message("forever1", "user", "[ASYNC DELEGATION BATCH COMPLETE — internal]", timestamp=2000)
+    with db._lock:
+        db._conn.execute(
+            "UPDATE messages SET display_kind = ? WHERE session_id = ? AND timestamp = ?",
+            (display_kind, "forever1", 2000),
+        )
+    db.close()
+
+    preview = _row(_profiles({}), "default")["canonical_session"]["preview"]
+
+    assert preview == "last visible reply"
+
+
 def test_canonical_session_none_when_no_bot_chat_row(home):
     db = _db(home)
     _add_session(db, "real1", title="Real", ts=1000, text="real content")
@@ -547,3 +564,168 @@ def test_profiles_list_does_not_wait_out_write_lock(home):
     canonical = row["canonical_session"]
     assert canonical is not None, "WAL readers must still resolve Bot Chat under a live writer"
     assert "hello from bot" in canonical["preview"]
+
+
+def test_canonical_owner_read_state_cross_device_and_runtime_isolation(home):
+    """Two clients poll one persisted read watermark, even when the tail is internal."""
+    db = _db(home)
+    _add_session(db, "owner-chat", title="Bot Chat", ts=1000, text="Owner asks")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from hermes_cli.web_routers.sessions import manage_router
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    import time
+    app = FastAPI()
+    app.include_router(manage_router)
+    client = TestClient(app)
+    scope_token = set_hermes_home_override(str(home))
+    db.set_session_read("owner-chat", False)
+    db.append_message("owner-chat", "assistant", '{"answer": 42}', timestamp=1010)
+    db.append_message("owner-chat", "tool", "raw shell output", timestamp=1020)
+    db.append_message("owner-chat", "user", "[System: model routing changed]", timestamp=1030)
+    db.append_message("owner-chat", "user", "Message from Sami: internal", timestamp=1040)
+    db.append_message("owner-chat", "assistant", "runtime", timestamp=1050, display_kind="control")
+    db.append_message("owner-chat", "assistant", "[SILENT]", timestamp=1060)
+    before = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert before == {"version": 1, "last_read_at": 0, "latest_reply_at": 1010}
+    # Mobile's existing native writer, followed by an independent Mac poll.
+    assert client.patch("/api/sessions/owner-chat", json={"unread": False, "profile": "default"}).status_code == 200
+    mobile_read = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert mobile_read["last_read_at"] > mobile_read["latest_reply_at"]
+    db.append_message("owner-chat", "assistant", "A new actual reply", timestamp=time.time())
+    both_unread = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert both_unread["latest_reply_at"] > both_unread["last_read_at"]
+    # Reading with a fresh DB handle stands for the other device; restart the
+    # read connection and prove the same native watermark survives.
+    db.close()
+    reopened = _db(home)
+    assert client.patch("/api/sessions/owner-chat", json={"unread": False, "profile": "default"}).status_code == 200
+    after = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert after["last_read_at"] >= after["latest_reply_at"]
+    assert after["latest_reply_at"] == both_unread["latest_reply_at"]
+    # A different profile has no read state from this one.
+    assert _row(_profiles({}), "ops")["canonical_session"] is None
+    reopened.close()
+    client.close()
+    reset_hermes_home_override(scope_token)
+
+
+def test_owner_read_projection_artifacts_typing_and_internal_rows(home):
+    db = _db(home)
+    _add_session(db, "artifact-chat", title="Bot Chat", ts=1000, text="Owner request")
+    attachment = {"attachments": [{"artifact_id": "safe-fixture-file", "filename": "report.pdf"}]}
+    db.append_message("artifact-chat", "assistant", "", timestamp=1010, display_metadata=attachment)
+    # Useful produced assistant file counts, even without prose.
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["latest_reply_at"] == 1010 and state["last_read_at"] is None
+    db.append_message("artifact-chat", "assistant", "", timestamp=1015,
+                      display_metadata={"attachments": [{}, {"artifact_id": 1}, {"artifact_id": ""}, "invalid"]})
+    # Artifacts on owner/tool/hidden rows do not change authorship or visibility.
+    db.append_message("artifact-chat", "tool", "", timestamp=1020, display_metadata=attachment)
+    db.append_message("artifact-chat", "user", "", timestamp=1030, display_metadata=attachment)
+    db.append_message("artifact-chat", "assistant", "", timestamp=1040, display_kind="hidden", display_metadata=attachment)
+    db.append_message("artifact-chat", "assistant", "raw tool carrier", timestamp=1050, tool_name="terminal", tool_call_id="tool-1")
+    db.append_message("artifact-chat", "assistant", "bookkeeping", timestamp=1060, display_kind="future_runtime_kind")
+    db.append_message("artifact-chat", "system", "bookkeeping", timestamp=1070)
+    db.append_message("artifact-chat", "user", "[Message from agent 'Sami']: hello", timestamp=1080)
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["latest_reply_at"] == 1010
+    db.close()
+
+
+def test_owner_read_state_follows_compression_not_ordinary_parentage(home):
+    import time
+    db = _db(home)
+    _add_session(db, "unrelated", title="Scratch", ts=900, text="scratch")
+    db.append_message("unrelated", "assistant", "Not part of canonical", timestamp=time.time()+1000)
+    _add_session(db, "read-root", title="Bot Chat", ts=1000, text="Owner", parent="unrelated")
+    db.append_message("read-root", "assistant", "Already read reply", timestamp=1010)
+    db.set_session_read("read-root")
+    root_read = db.get_session("read-root")["last_read_at"]
+    db.end_session("read-root", "compression")
+    _add_session(db, "read-child", title="", ts=time.time(), text="Continuation", parent="read-root")
+    assert db.get_session("read-child")["last_read_at"] is None
+    canonical = _row(_profiles({}), "default")["canonical_session"]
+    state = canonical["owner_read_state"]
+    assert canonical["resolved_id"] == "read-child"
+    assert state["last_read_at"] == root_read and state["latest_reply_at"] == 1010
+    db.append_message("read-child", "assistant", "New real reply", timestamp=time.time())
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["latest_reply_at"] > state["last_read_at"]
+    db.set_session_read("read-child")
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["last_read_at"] >= state["latest_reply_at"]
+    assert db.get_session("read-root")["last_read_at"] == db.get_session("read-child")["last_read_at"]
+    # Explicit mark-unread follows the same lineage, not unrelated ancestors.
+    db.set_session_read("read-root", False)
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["last_read_at"] == 0
+    assert db.get_session("unrelated")["last_read_at"] is None
+    db.close()
+
+
+def test_assistant_words_do_not_change_provenance(home):
+    db = _db(home)
+    _add_session(db, "prefix-chat", title="Bot Chat", ts=1000, text="Owner asks")
+    db.append_message("prefix-chat", "assistant", "Message from the bank: your application was approved.", timestamp=1010)
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["latest_reply_at"] == 1010
+    db.append_message("prefix-chat", "assistant", "[Message from agent 'Sami']: a quoted example", timestamp=1020)
+    state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+    assert state["latest_reply_at"] == 1020
+    # Actual incoming internal traffic uses user provenance, not assistant.
+    db.append_message("prefix-chat", "user", "Message from Sami: an internal memo", timestamp=1030)
+    assert _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]["latest_reply_at"] == 1020
+    db.close()
+
+
+def test_delayed_observed_read_cannot_consume_new_reply_or_regress_other_device(home):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from hermes_cli.web_routers.sessions import manage_router
+    db = _db(home)
+    _add_session(db, "bounded-chat", title="Bot Chat", ts=1000, text="Owner asks")
+    db.append_message("bounded-chat", "assistant", "Observed by phone", timestamp=1010)
+    observed = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]["latest_reply_at"]
+    # The request is delayed while a newer actual reply arrives, after reading ended.
+    db.append_message("bounded-chat", "assistant", "Not observed by phone", timestamp=1020)
+    app = FastAPI(); app.include_router(manage_router)
+    with TestClient(app) as client:
+        path = "/api/sessions/bounded-chat"
+        base = {"profile": "default", "unread": False}
+        assert client.patch(path, json={**base, "read_through": observed}).status_code == 200
+        state = _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]
+        assert state["last_read_at"] == 1010 and state["latest_reply_at"] == 1020
+        assert client.patch(path, json={**base, "read_through": 1020}).status_code == 200
+        # An older, reordered request cannot undo another device's newer read.
+        assert client.patch(path, json={**base, "read_through": observed}).status_code == 200
+        assert db.get_session("bounded-chat")["last_read_at"] == 1020
+        # Explicit mark-unread remains a native operation, not monotonic read.
+        assert client.patch(path, json={"profile": "default", "unread": True}).status_code == 200
+        assert db.get_session("bounded-chat")["last_read_at"] == 0
+        assert client.patch(path, json={**base, "unread": True, "read_through": 1020}).status_code == 400
+        for invalid in (True, -1, "1020", "NaN"):
+            assert client.patch(path, json={**base, "read_through": invalid}).status_code == 422
+        # Legacy clients retain the original read-now contract.
+        assert client.patch(path, json=base).status_code == 200
+        assert db.get_session("bounded-chat")["last_read_at"] >= 1020
+    db.close()
+
+
+def test_observed_read_is_monotonic_across_new_compression_child(home):
+    db = _db(home)
+    _add_session(db, "bounded-root", title="Bot Chat", ts=1000, text="Owner")
+    db.append_message("bounded-root", "assistant", "Read earlier", timestamp=1010)
+    db.set_session_read("bounded-root", through=1010)
+    db.end_session("bounded-root", "compression")
+    _add_session(db, "bounded-child", title="", ts=1020, text="Continue", parent="bounded-root")
+    db.append_message("bounded-child", "assistant", "New reply", timestamp=1030)
+    db.set_session_read("bounded-child", through=1005)
+    assert db.get_session("bounded-root")["last_read_at"] == 1010
+    assert db.get_session("bounded-child")["last_read_at"] == 1010
+    assert _row(_profiles({}), "default")["canonical_session"]["owner_read_state"]["latest_reply_at"] == 1030
+    db.set_session_read("bounded-child", through=1030)
+    assert db.get_session("bounded-root")["last_read_at"] == 1030
+    db.set_session_read("bounded-root", False)
+    assert db.get_session("bounded-child")["last_read_at"] == 0
+    db.close()

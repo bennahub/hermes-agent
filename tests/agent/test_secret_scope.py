@@ -378,3 +378,17 @@ class TestSecretScopeAcrossExecutorThreads:
         finally:
             pool.shutdown(wait=True)
             ss.reset_secret_scope(token)
+
+
+def test_profile_credential_seal_roundtrip_uses_exact_raw_profile(tmp_path, monkeypatch):
+    from tui_gateway.methods_profiles import _seal_profile_credentials
+    from agent.secret_scope import _profile_seals_credentials
+    from hermes_cli.config import read_user_config_raw
+    config = tmp_path / "config.yaml"
+    config.write_text("name: تقرير\ncredentials:\n  custom: retained\n", encoding="utf-8")
+    assert _profile_seals_credentials(tmp_path) is False
+    _seal_profile_credentials(tmp_path)
+    assert _profile_seals_credentials(tmp_path) is True
+    raw = read_user_config_raw(config)
+    assert raw["name"] == "تقرير"
+    assert raw["credentials"] == {"custom":"retained", "inherit_process_env":False}

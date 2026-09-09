@@ -24,6 +24,18 @@ export function formatTimelineTimestamp(seconds: number | undefined): string {
   return date ? fmtTimelineClock.format(date) : ''
 }
 
+/**
+ * Minute-precision wall clock (e.g. `4:30 PM`) for message bubbles. Chat rows
+ * answer "when was this sent / when did it land", not "how long did it run",
+ * so they deliberately drop the seconds and milliseconds that tool activity
+ * boundaries still need.
+ */
+export function formatClockTimestamp(seconds: number | undefined): string {
+  const date = timelineDate(seconds)
+
+  return date ? fmtClock.format(date) : ''
+}
+
 export function formatTimelineRange(start: number | undefined, end: number | undefined): string {
   const from = formatTimelineTimestamp(start)
 

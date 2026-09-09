@@ -40,3 +40,12 @@ except (ModuleNotFoundError, ImportError):
             return "~/" + home.relative_to(Path.home()).as_posix()
         except ValueError:
             return str(home)
+
+
+def get_default_hermes_root() -> Path:
+    try:
+        from hermes_constants import get_default_hermes_root as native
+    except (ImportError, ModuleNotFoundError):
+        home = get_hermes_home()
+        return home.parent.parent if home.parent.name == 'profiles' else home
+    return native()

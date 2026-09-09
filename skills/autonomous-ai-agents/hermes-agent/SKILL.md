@@ -105,6 +105,7 @@ Profiles use `~/.hermes/profiles/<name>/` with the same layout. When a profile i
 | Pet mascots — install, select, scale, diagnose | `references/petdex.md` |
 | Windows-specific issues (keybinds, WinError 10106, BOM) | `references/windows-quirks.md` |
 | Debugging: voice, tools missing, gateway, aux models | `references/troubleshooting.md` |
+| Hosted Hermes health (SHA, gateway, serve, schema, scheduler) | `hermes runtime --json` — never this machine, an Agent Computer, or `systemctl --user` |
 | Contributing code: adding tools, slash commands, tests | `references/contributor-guide.md` |
 | delegate_task "capped at N" reports | `references/delegate-task-concurrency-diagnosis.md` |
 | "Can app X use my Nous Portal subscription/OAuth?" | `references/portal-auth-for-third-party-apps.md` |
@@ -211,3 +212,4 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Secrets in `.env`, settings in `config.yaml`** — never tell a user to put a non-credential setting in `.env`.
 - **Profile-safe paths** — `get_hermes_home()` in code, `$HERMES_HOME` when resolving paths in a session.
 - **Never hand-edit `config.yaml` for the user** — use `hermes config set KEY VAL`; a stray indent can corrupt the file and break the live gateway.
+- **Hosted Hermes health** — `hermes runtime --json` is the only source for gateway/serve/SHA/schema/scheduler. Never treat this machine, an Agent Computer, a local checkout, or `systemctl --user` as Hermes truth.

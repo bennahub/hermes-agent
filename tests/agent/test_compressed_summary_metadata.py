@@ -158,7 +158,7 @@ class TestClassifyAgreesWithPredicatesOnLiveEmissions:
             cc = ContextCompressor(
                 model="test-model",
                 threshold_percent=0.85,
-                protect_first_n=1,
+                protect_first_n=2,
                 protect_last_n=1,
                 quiet_mode=True,
             )
@@ -192,7 +192,10 @@ class TestClassifyAgreesWithPredicatesOnLiveEmissions:
     def test_merged_emission_classifies_merged_and_predicates_agree(self):
         """Alternating transcripts take the merge-into-tail path on current
         main — the emitted handoff must classify 'merged'."""
-        flagged = self._live_compress(_make_messages())
+        # Keep a complete head exchange and start the tail on a user row so
+        # both neighbors require the native merge-into-tail branch.
+        with patch.object(ContextCompressor, "_find_tail_cut_by_tokens", return_value=5):
+            flagged = self._live_compress(_make_messages())
         assert len(flagged) == 1
         kind = self._assert_agreement(flagged[0])
         assert kind == "merged"

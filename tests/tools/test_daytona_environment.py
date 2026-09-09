@@ -53,6 +53,8 @@ def _patch_daytona_imports(monkeypatch):
 @pytest.fixture()
 def daytona_sdk(monkeypatch):
     """Provide a mock daytona SDK module and return it for assertions."""
+    # The SDK is supplied below; never install optional packages in adapter tests.
+    monkeypatch.setattr("tools.environments.daytona.ensure_lazy_dep", lambda name: None)
     return _patch_daytona_imports(monkeypatch)
 
 

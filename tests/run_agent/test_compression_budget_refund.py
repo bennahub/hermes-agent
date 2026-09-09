@@ -170,11 +170,11 @@ def _coherent_compressor() -> MagicMock:
 
 
 @pytest.fixture()
-def agent():
+def agent(scoped_test_ingress):
     with (
-        patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("model_tools.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
     ):
         a = AIAgent(
             api_key="test-key-1234567890",
@@ -192,6 +192,7 @@ def agent():
     a.save_trajectories = False
     a.compression_enabled = True
     a.context_compressor = _coherent_compressor()
+    scoped_test_ingress(a)
     return a
 
 
@@ -225,16 +226,16 @@ def _run_marathon_turn(
 
     with (
         patch.object(agent, "_compress_context", side_effect=_fake_compress),
-        patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
         patch(
-            "run_agent.handle_function_call",
+            "model_tools.handle_function_call",
             lambda name, args, task_id=None, **kwargs: json.dumps(
                 {"ok": True, "payload": BIG_TOOL_RESULT}
             ),
         ),
     ):
+        agent._test_execution_request('do a lot of tool work', [(tc.function.name, json.loads(tc.function.arguments)) for response in responses for tc in (response.choices[0].message.tool_calls or [])])
         result = agent.run_conversation("do a lot of tool work")
 
     return result, compress_calls

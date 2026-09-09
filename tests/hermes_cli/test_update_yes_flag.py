@@ -13,6 +13,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from hermes_cli.main import cmd_update
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_simulated_update(monkeypatch):
+    # Simulated git never replaces source. Keep process-discovery fakes installed.
+    from hermes_cli.update_inventory import UpdatePlan
+    monkeypatch.setattr('hermes_cli.update_cmd._purge_stale_hermes_modules', lambda: None)
+    monkeypatch.setattr('hermes_cli.gateway.find_gateway_pids', lambda *a, **kw: [])
+    monkeypatch.setattr('hermes_cli.gateway.find_profile_gateway_processes', lambda *a, **kw: [])
+    monkeypatch.setattr('hermes_cli.gateway.supports_systemd_services', lambda: False)
+    monkeypatch.setattr('hermes_cli.update_inventory.collect_runtime_inventory', lambda: UpdatePlan())
+    monkeypatch.setattr('hermes_cli.update_receipt.collect_fleet_versions', lambda **kw: [])
+
 
 
 def _make_run_side_effect(

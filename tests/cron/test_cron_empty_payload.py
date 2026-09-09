@@ -373,14 +373,17 @@ def test_run_one_job_does_not_resurrect_the_paused_no_agent_job(hermes_env):
     assert [j["id"] for j in get_due_jobs()] == []
 
 
-def test_run_job_does_not_block_a_valid_no_agent_job(hermes_env):
+def test_run_job_does_not_block_a_valid_no_agent_job(hermes_env, migrate_configured_cron_job):
     """The guard sits after the no_agent short-circuit, which must still run."""
     import cron.scheduler as scheduler
 
     script = hermes_env / "scripts" / "w.sh"
     script.write_text("echo hello\n")
 
-    job = dict(_legacy_empty_job(hermes_env), script="w.sh", no_agent=True)
+    from cron.jobs import update_job
+    original = _legacy_empty_job(hermes_env)
+    job = update_job(original["id"], {"script": "w.sh", "no_agent": True})
+    job = migrate_configured_cron_job(hermes_env, job)
     success, doc, final, error = scheduler.run_job(job)
 
     assert success is True

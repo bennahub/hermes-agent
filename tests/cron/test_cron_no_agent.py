@@ -89,7 +89,7 @@ def test_cronjob_tool_create_no_agent_without_script_errors(hermes_env):
 # ---------------------------------------------------------------------------
 
 
-def test_run_job_no_agent_success_returns_script_stdout(hermes_env):
+def test_run_job_no_agent_success_returns_script_stdout(hermes_env, migrate_configured_cron_job):
     """Happy path: script exits 0 with output, delivered verbatim."""
     from cron.jobs import create_job
     from cron.scheduler import run_job
@@ -100,6 +100,7 @@ def test_run_job_no_agent_success_returns_script_stdout(hermes_env):
     job = create_job(
         prompt=None, schedule="every 5m", script="alert.sh", no_agent=True, deliver="local"
     )
+    job = migrate_configured_cron_job(hermes_env, job)
     success, doc, final_response, error = run_job(job)
     assert success is True
     assert error is None
@@ -107,7 +108,7 @@ def test_run_job_no_agent_success_returns_script_stdout(hermes_env):
     assert "RAM 92% on host" in doc
 
 
-def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch):
+def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch, migrate_configured_cron_job):
     """Regression: a standalone cron tick process starts without home-channel
     vars in its environment, and the agent path's per-run dotenv reload never
     executes for no_agent jobs — delivery home channels stayed unresolved.
@@ -130,6 +131,7 @@ def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch):
     job = create_job(
         prompt=None, schedule="every 5m", script="probe.sh", no_agent=True, deliver="local"
     )
+    job = migrate_configured_cron_job(hermes_env, job)
     success, doc, final_response, error = run_job(job)
     assert success is True
     assert error is None
@@ -138,7 +140,7 @@ def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch):
 
 
 def test_timed_out_no_agent_script_delivery_is_not_mislabeled_as_provider_failure(
-    hermes_env, monkeypatch,
+    hermes_env, monkeypatch, migrate_configured_cron_job,
 ):
     """A watchdog timeout happens before any LLM/provider call.
 
@@ -147,6 +149,7 @@ def test_timed_out_no_agent_script_delivery_is_not_mislabeled_as_provider_failur
     """
     from cron.jobs import create_job
     import cron.scheduler as scheduler
+    from cron import scheduler_script as sched_script
 
     (hermes_env / "scripts" / "slow.py").write_text("import time; time.sleep(999)\n")
     job = create_job(
@@ -157,6 +160,7 @@ def test_timed_out_no_agent_script_delivery_is_not_mislabeled_as_provider_failur
         deliver="telegram",
         name="slow watchdog",
     )
+    job = migrate_configured_cron_job(hermes_env, job)
     delivered = []
 
     # The script runner uses Popen + a polling loop (cancel/timeout aware),
@@ -184,10 +188,8 @@ def test_timed_out_no_agent_script_delivery_is_not_mislabeled_as_provider_failur
             self.returncode = -9
 
     monkeypatch.setattr(scheduler.subprocess, "Popen", _NeverFinishes)
-    monkeypatch.setattr(scheduler, "_get_script_timeout", lambda: 1)
-    monkeypatch.setattr(
-        scheduler,
-        "_terminate_cron_script_process",
+    monkeypatch.setattr(sched_script, "_get_script_timeout", lambda: 1)
+    monkeypatch.setattr(sched_script, "_terminate_cron_script_process",
         lambda proc: setattr(proc, "returncode", -15),
     )
     monkeypatch.setattr(
@@ -207,6 +209,7 @@ def test_agent_provider_timeout_delivery_keeps_fallback_guidance(hermes_env, mon
     """Provider timeout classification remains available to agent-backed jobs."""
     from cron.jobs import create_job
     import cron.scheduler as scheduler
+    from cron import scheduler_script as sched_script
 
     job = create_job(
         prompt="Summarize the overnight logs.",
@@ -247,7 +250,7 @@ def test_agent_provider_timeout_delivery_keeps_fallback_guidance(hermes_env, mon
 
 def test_run_job_script_path_traversal_still_blocked(hermes_env):
     """Security regression: shell-script support must NOT loosen containment."""
-    from cron.scheduler import _run_job_script
+    from cron.scheduler_script import _run_job_script
 
     # Absolute path outside the scripts dir should be rejected.
     ok, output = _run_job_script("/etc/passwd")
@@ -268,7 +271,7 @@ def test_run_job_script_nul_path_fails_cleanly(hermes_env):
     expanduser() ValueError and report a generic invalid-path message, so
     a bare "Blocked" assertion could not tell the fixed code from the
     unfixed code; on Windows the unfixed code crashes outright."""
-    from cron.scheduler import _run_job_script
+    from cron.scheduler_script import _run_job_script
 
     ok, output = _run_job_script("~user\x00bad.sh")
     assert ok is False
@@ -285,12 +288,13 @@ def test_run_job_script_nul_rejected_before_any_path_call(hermes_env, monkeypatc
     proves the rejection happens before any pathlib call on every
     platform, not just the ones where expanduser happens to raise."""
     import cron.scheduler as scheduler_module
+    from cron import scheduler_script as sched_script
 
     def boom(*_args, **_kwargs):
         raise AssertionError("Path must not be touched for a NUL-bearing script path")
 
     monkeypatch.setattr(scheduler_module, "Path", boom)
-    ok, output = scheduler_module._run_job_script("nul\x00byte.sh")
+    ok, output = sched_script._run_job_script("nul\x00byte.sh")
     assert ok is False
     assert "NUL byte" in output
 
@@ -303,7 +307,7 @@ def test_run_job_script_accepts_pathlike_script_path(hermes_env):
     scheduler at the guard itself. The guard coerces with str() first;
     a valid Path must still run the script end-to-end (regression for
     the #86832 review point)."""
-    from cron.scheduler import _run_job_script
+    from cron.scheduler_script import _run_job_script
 
     script = hermes_env / "scripts" / "probe.py"
     script.write_text('print("pathlike ok")\n', encoding="utf-8")

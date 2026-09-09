@@ -137,6 +137,9 @@ async def test_completed_webhook_delivery_closes_its_session(tmp_path):
     session_id = created["session_id"]
     row = store._db.get_session(session_id)
     assert row is not None
+    assert row["hidden"] == 1, (
+        "webhook execution history must stay queryable but hidden from owner recents"
+    )
 
     # INVARIANT: a completed webhook session must be closed so prune can reap it.
     assert row["ended_at"] is not None, (

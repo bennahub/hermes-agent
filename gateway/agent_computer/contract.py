@@ -15,7 +15,16 @@ from .pointer import mapping_kind
 from .service import AgentComputerService
 
 
-def live_view_public(*, headed_same_host: bool = False) -> dict[str, Any]:
+def live_view_public(*, headed_same_host: bool = False, stream: bool = False) -> dict[str, Any]:
+    """REST observe stays screenshot-on-demand. Takeover advertises the WS stream."""
+    if stream:
+        return {
+            "kind": "screencast_frames",
+            "same_environment": True,
+            "remote_stream": True,
+            "headed_same_host": bool(headed_same_host),
+            "public_cdp": False,
+        }
     return {
         "kind": "screenshot_on_demand",
         "same_environment": True,
@@ -92,6 +101,7 @@ class AgentComputerContract:
         return sanitize_public(self.service.public_status(computer))
 
     def status(self, computer_id: str, principal: str) -> dict[str, Any]:
+        self.service.expire_owner_if_needed(computer_id)
         computer = self.service.get_computer(computer_id)
         self.service.authorize_read(computer, principal)
         return sanitize_public(self.service.public_status(computer))
@@ -142,11 +152,17 @@ class AgentComputerContract:
         computer = self.service.sleep(computer_id, principal)
         return sanitize_public(self.service.public_status(computer))
 
+    def retire_profile(self, profile_id: str, principal: str) -> dict[str, Any]:
+        """Retire a deleted agent's computer. Owner-only; idempotent when there is none."""
+        return self.service.retire_profile(profile_id, principal)
+
     def observe(
-        self, computer_id: str, principal: str, *, lease_id: str, fencing_epoch: int
+        self, computer_id: str, principal: str, *, lease_id: str, fencing_epoch: int,
+        wake_if_needed: bool = True,
     ) -> dict[str, Any]:
         obs = self.service.observe(
-            computer_id, principal, lease_id=lease_id, fencing_epoch=fencing_epoch
+            computer_id, principal, lease_id=lease_id, fencing_epoch=fencing_epoch,
+            wake_if_needed=wake_if_needed,
         )
         screenshot = None
         if obs.screenshot_b64:
@@ -160,7 +176,7 @@ class AgentComputerContract:
             "width": obs.viewport_width,
             "height": obs.viewport_height,
         }
-        view = live_view_public(headed_same_host=False)
+        view = live_view_public(headed_same_host=getattr(self.service.runtime, "native_desktop", False) is True)
         view["mapping"] = mapping_kind(
             obs.screenshot_width,
             obs.screenshot_height,
@@ -178,6 +194,7 @@ class AgentComputerContract:
                 "screenshot": screenshot,
                 "viewport": viewport,
                 "live_view": view,
+                "location": self.service.public_location(self.service.get_computer(computer_id)),
             }
         )
 
@@ -235,7 +252,7 @@ class AgentComputerContract:
         token = raw.get("takeover_token")
         payload = sanitize_public({k: v for k, v in raw.items() if k != "takeover_token"})
         payload["takeover_token"] = token
-        payload["live_view"] = live_view_public(headed_same_host=False)
+        payload["live_view"] = live_view_public(headed_same_host=False, stream=True)
         return payload
 
     def connect_takeover(
@@ -271,6 +288,68 @@ class AgentComputerContract:
         if lease:
             payload["agent_lease_id"] = lease.lease_id
         return sanitize_public(payload)
+
+    def open_stream(
+        self,
+        computer_id: str,
+        principal: str,
+        *,
+        lease_id: str,
+        fencing_epoch: int,
+        width: int = 0,
+        height: int = 0,
+    ) -> dict[str, Any]:
+        session, computer = self.service.open_owner_stream(
+            computer_id,
+            principal,
+            lease_id=lease_id,
+            fencing_epoch=fencing_epoch,
+            width=width,
+            height=height,
+        )
+        from .location import public_location
+
+        loc = self.service.public_location(computer)
+        hello = session.public_hello(
+            control=computer.control_authority.value,
+            url=str(loc.get("url") or ""),
+            title=str(loc.get("title") or ""),
+        )
+        hello["origin"] = loc.get("origin") or ""
+        hello["https"] = bool(loc.get("https"))
+        hello["scheme"] = loc.get("scheme") or ""
+        hello["source"] = loc.get("source") or ""
+        hello["native_desktop"] = getattr(self.service.runtime, "native_desktop", False) is True
+        return sanitize_public(hello)
+
+    def stream_input(
+        self,
+        computer_id: str,
+        principal: str,
+        *,
+        lease_id: str,
+        fencing_epoch: int,
+        generation: int,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        return sanitize_public(
+            self.service.owner_stream_input(
+                computer_id,
+                principal,
+                lease_id=lease_id,
+                fencing_epoch=fencing_epoch,
+                generation=generation,
+                event=event,
+            )
+        )
+
+    def close_stream(self, computer_id: str, generation: int) -> dict[str, Any]:
+        self.service.close_owner_stream(computer_id, generation)
+        return sanitize_public({"ok": True, "control_retained": True})
+
+    def stream_runtime_handle(self, computer_id: str):
+        """Loopback handle for the authenticated stream pump. Never serialized."""
+        return self.service._handle(self.service.get_computer(computer_id))
 
     def list_artifacts(self, computer_id: str, principal: str) -> dict[str, Any]:
         computer = self.service.get_computer(computer_id)

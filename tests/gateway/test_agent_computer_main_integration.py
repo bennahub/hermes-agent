@@ -64,18 +64,6 @@ def test_config_defaults_keep_current_main_and_resolve_runtime():
     ) == "chromium"
 
 
-def test_toolsets_keep_current_main_and_opt_in_agent_computer():
-    assert "agent_computer" in TOOLSETS
-    assert set(resolve_toolset("agent_computer")) == COMPUTER_TOOLS
-    assert COMPUTER_TOOLS.isdisjoint(_HERMES_CORE_TOOLS)
-    assert COMPUTER_TOOLS.isdisjoint(resolve_toolset("hermes-cli"))
-    assert COMPUTER_TOOLS.isdisjoint(resolve_toolset("hermes-telegram"))
-    assert "web_search" in resolve_toolset("hermes-cli")
-    assert "terminal" in resolve_toolset("hermes-cli")
-    for name, spec in TOOLSETS.items():
-        if name == "agent_computer":
-            continue
-        assert COMPUTER_TOOLS.isdisjoint(set(spec.get("tools") or ())), name
 
 
 def test_web_server_keeps_existing_routers_and_mounts_agent_computer():

@@ -62,7 +62,7 @@ def test_no_compressible_window_backs_off_without_strike():
         {"role": "user", "content": "latest request in protected tail"},
     ]
 
-    with patch.object(compressor, "_find_tail_cut_by_tokens", return_value=2):
+    with patch.object(compressor, "_find_tail_cut_by_tokens", return_value=1):
         result = compressor.compress(messages, current_tokens=90_000)
 
     assert result == messages

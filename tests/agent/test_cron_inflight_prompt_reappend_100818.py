@@ -251,7 +251,14 @@ def test_pending_trailing_tool_call_survives_the_replay():
         i for i, m in enumerate(out)
         if m.get("role") == "user" and JOB_SENTINEL in str(m.get("content"))
     )
-    assert replay_idx > out.index(pending[0])
+    # The original active request is carried before retained tool flow, so the
+    # genuinely pending call remains trailing and can pair with its late result.
+    assert replay_idx < out.index(pending[0])
+    paired = _make_compressor()._sanitize_tool_pairs(
+        [*out, {"role": "tool", "tool_call_id": "pending", "content": "late result"}]
+    )
+    assert any(m.get("tool_call_id") == "pending" for m in paired)
+    assert any(any(tc.get("id") == "pending" for tc in m.get("tool_calls", [])) for m in paired)
 
 
 def _compress_with(protect_first_n: int, compression_count: int, messages):

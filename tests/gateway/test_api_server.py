@@ -3087,3 +3087,38 @@ class TestCreateAgentModelRecovery:
         )
         adapter._create_agent(session_id="s2", gateway_session_key="ch")
         assert captured[1]["model"] == "anthropic/claude-opus-4.6"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route,body", [
+    ("/v1/chat/completions", {"messages":[{"role":"user","content":"old command"},{"role":"assistant","content":"old summary"},{"role":"user","content":"inspect current report"}]}),
+    ("/v1/responses", {"input":"inspect current report","conversation_history":[{"role":"user","content":"old command"}]}),
+])
+async def test_api_current_original_source_excludes_history(adapter, monkeypatch, route, body):
+    from tools.owner_task_authority import consume_execution_source
+    monkeypatch.delenv("HERMES_EXECUTION_SCOPE",raising=False)
+    agent=MagicMock()
+    agent.session_id="api-original-test"
+    agent.session_prompt_tokens=agent.session_completion_tokens=agent.session_total_tokens=0
+    captured=[]
+    def run(**kwargs):
+        captured.append(consume_execution_source(agent))
+        return {"final_response":"ok","messages":[],"api_calls":1}
+    agent.run_conversation.side_effect=run
+    async with TestClient(TestServer(_create_app(adapter))) as client:
+        with patch.object(adapter,"_create_agent",return_value=agent):
+            response=await client.post(route,json=body)
+            assert response.status==200, await response.text()
+    assert captured[0]["instruction"]=="inspect current report"
+    assert captured[0]["kind"]=="owner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["assistant","system"])
+async def test_api_does_not_find_older_user_as_new_authority(adapter, role):
+    async with TestClient(TestServer(_create_app(adapter))) as client:
+        with patch.object(adapter,"_run_agent",new_callable=AsyncMock) as run:
+            response=await client.post("/v1/chat/completions",json={"messages":[
+                {"role":"user","content":"historical command"},{"role":role,"content":"history"}]})
+            assert response.status==400
+            run.assert_not_called()

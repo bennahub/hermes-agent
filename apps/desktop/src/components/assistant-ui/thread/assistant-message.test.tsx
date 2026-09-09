@@ -12,7 +12,7 @@ import { $displayTimestamps } from '@/store/display-timestamps'
 
 import { stubThreadEnvironment } from '../test-utils'
 
-import { formatTimelineRange, formatTimelineTimestamp } from './timestamp'
+import { formatClockTimestamp, formatTimelineRange } from './timestamp'
 
 import { Thread } from '.'
 
@@ -108,7 +108,7 @@ describe('AssistantMessage branch button visibility (bug #2 fix)', () => {
 })
 
 describe('message timeline timestamps', () => {
-  it('always renders precise user and assistant lifecycle times', async () => {
+  it('shows chat bubbles as a minute-precision clock and activity parts as precise ranges', async () => {
     const { container } = render(<Harness />)
 
     await screen.findByText('done')
@@ -119,18 +119,29 @@ describe('message timeline timestamps', () => {
 
     const startedAt = createdAt.getTime() / 1000
 
-    expect(stamps).toContain(formatTimelineTimestamp(startedAt))
-    expect(stamps).toContain(formatTimelineRange(startedAt, completedAt))
+    // Bubble rows: "when was it sent" / "when did it land", no seconds.
+    expect(stamps).toContain(formatClockTimestamp(startedAt))
+    expect(stamps).toContain(formatClockTimestamp(completedAt))
+    expect(stamps).not.toContain(formatTimelineRange(startedAt, completedAt))
+    // The text part carries the prose, so it is a bubble row too — this is
+    // the exact row that used to print `5:06:59.615 AM → 5:08:37.037 AM`.
+    expect(stamps).not.toContain(formatTimelineRange(startedAt + 0.125, startedAt + 0.5))
+
+    // Reasoning stays an activity boundary and keeps full precision.
     expect(stamps).toContain(formatTimelineRange(startedAt + 0.05, startedAt + 0.1))
-    expect(stamps).toContain(formatTimelineRange(startedAt + 0.125, startedAt + 0.5))
   })
 
-  it('suppresses an aggregate assistant stamp that exactly duplicates its sole part', async () => {
+  it('renders the assistant landing clock from the completion time, not the send time', async () => {
     const startedAt = createdAt.getTime() / 1000
+    // Deliberately crosses a minute boundary so "sent" and "landed" differ.
+    const landedAt = startedAt + 130
 
     const assistant = {
       ...assistantMessage(),
-      content: [{ completedAt, text: 'done', timestamp: startedAt, type: 'text' }]
+      metadata: {
+        ...assistantMessage().metadata,
+        custom: { timelineCompletedAt: landedAt, timelineTimestamp: startedAt }
+      }
     } as unknown as ThreadMessage
 
     const { container } = render(<Harness assistant={assistant} />)
@@ -141,6 +152,38 @@ describe('message timeline timestamps', () => {
       node.textContent?.trim()
     )
 
-    expect(stamps.filter(stamp => stamp === formatTimelineRange(startedAt, completedAt))).toHaveLength(1)
+    expect(formatClockTimestamp(landedAt)).not.toBe(formatClockTimestamp(startedAt))
+    expect(stamps).toContain(formatClockTimestamp(landedAt))
+  })
+
+  it('suppresses an aggregate assistant stamp that exactly duplicates its sole part', async () => {
+    const startedAt = createdAt.getTime() / 1000
+    // Cross a minute boundary so the assistant's landing clock is textually
+    // distinct from the user bubble's send clock and the two can be counted.
+    const landedAt = startedAt + 130
+
+    const assistant = {
+      ...assistantMessage(),
+      content: [{ completedAt: landedAt, text: 'done', timestamp: startedAt, type: 'text' }],
+      metadata: {
+        ...assistantMessage().metadata,
+        custom: { timelineCompletedAt: landedAt, timelineTimestamp: startedAt }
+      }
+    } as unknown as ThreadMessage
+
+    const { container } = render(<Harness assistant={assistant} />)
+
+    await screen.findByText('done')
+
+    const stamps = Array.from(container.querySelectorAll('[data-slot="timeline-timestamp"]')).map(node =>
+      node.textContent?.trim()
+    )
+
+    // Aggregate and sole part now render identically, so exactly one survives
+    // on the assistant bubble — plus the user bubble's own send clock.
+    expect(formatClockTimestamp(landedAt)).not.toBe(formatClockTimestamp(startedAt))
+    expect(stamps.filter(stamp => stamp === formatClockTimestamp(landedAt))).toHaveLength(1)
+    expect(stamps.filter(stamp => stamp === formatClockTimestamp(startedAt))).toHaveLength(1)
+    expect(stamps).not.toContain(formatTimelineRange(startedAt, landedAt))
   })
 })

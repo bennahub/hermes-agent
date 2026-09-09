@@ -115,7 +115,13 @@ type TimelineTextPartProps = TextMessagePartProps & { completedAt?: number; time
 
 const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestamp }) => (
   <>
-    <TimelineTimestamp className="mb-0.5 block" completedAt={completedAt} timestamp={timestamp} />
+    {/*
+      Prose is the bubble, not an activity boundary: it answers "when did this
+      land", so it takes the same minute-precision clock as the aggregate
+      message stamp. Reasoning and tool rows below keep `exact` — they measure
+      duration, where seconds and milliseconds are the point.
+    */}
+    <TimelineTimestamp className="mb-0.5 block" completedAt={completedAt} precision="clock" timestamp={timestamp} />
     <MarkdownText />
   </>
 )

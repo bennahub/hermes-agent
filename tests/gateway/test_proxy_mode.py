@@ -131,10 +131,10 @@ class TestResolveProxyUrl:
 
 
 class TestRunAgentProxyDispatch:
-    """Test that _run_agent() delegates to proxy when configured."""
+    """Remote execution without native scope transport fails closed."""
 
     @pytest.mark.asyncio
-    async def test_run_agent_delegates_to_proxy(self, monkeypatch):
+    async def test_run_agent_blocks_unsupported_scope_proxy(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
         runner = _make_runner()
         source = _make_source()
@@ -161,9 +161,11 @@ class TestRunAgentProxyDispatch:
             run_generation=7,
         )
 
-        assert result["final_response"] == "Hello from remote!"
-        runner._run_agent_via_proxy.assert_called_once()
-        assert runner._run_agent_via_proxy.call_args.kwargs["run_generation"] == 7
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert result["api_calls"] == 0
+        assert result["error"] == "execution_scope_transport_unavailable"
+        runner._run_agent_via_proxy.assert_not_called()
 
 
 class TestRunAgentViaProxy:

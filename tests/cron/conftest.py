@@ -70,3 +70,56 @@ def _reset_session_context_vars():
     _reset_all()
     yield
     _reset_all()
+
+
+@pytest.fixture()
+def migrate_configured_cron_job(monkeypatch, tmp_path):
+    """Adopt explicit fixture schedules through the real migration and action gate."""
+    import json
+    from types import SimpleNamespace
+    from scripts import migrate_execution_scopes as migration
+
+    def policy(**kwargs):
+        assert kwargs["task"] == "execution_scope"
+        payload = json.loads(kwargs["messages"][-1]["content"])
+        subject = payload["original_instruction"]
+        if "invocation" not in payload:
+            decision = {"objective": "Execute the explicit configured fixture schedule",
+                        "permitted": ["Only the configured script bytes"], "excluded": ["Unrelated actions"]}
+        else:
+            call = payload["invocation"]
+            from pathlib import Path
+            allowed_arguments = [
+                {**snapshot, "cwd": subject["configured_assignment"].get("workdir")
+                 or str(Path(snapshot["path"]).parent)}
+                for snapshot in subject["configured_scripts"].values()
+            ]
+            decision = {"allowed": call["tool"] == "cron_script"
+                        and call["arguments"] in allowed_arguments,
+                        "reason": "Exact explicitly configured script snapshot"}
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(decision)))])
+
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", policy)
+
+    def adopt(home, job):
+        from cron.jobs import get_job
+        (home / "profiles").mkdir(exist_ok=True)
+        manifest = migration.prepare(home)
+        migration.apply(manifest, tmp_path / ("scope-backup-" + job["id"]))
+        return get_job(job["id"])
+
+    return adopt
+
+
+@pytest.fixture()
+def run_scoped_cron_job():
+    """Supply the same persisted native execution identity used by scheduler dispatch."""
+    def run(job):
+        from cron.executions import create_execution, finish_execution
+        from cron.scheduler import run_job
+
+        execution = create_execution(job["id"], source="test-native-dispatch")
+        result = run_job(job, execution_id=execution["id"])
+        finish_execution(execution["id"], success=result[0])
+        return result
+    return run

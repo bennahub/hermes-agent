@@ -268,11 +268,12 @@ class _FakeDB:
 
 
 class _FakeAgent:
-    def __init__(self, home, title="Bot Chat"):
+    def __init__(self, home, title="Bot Chat", *, all_sessions=False):
         self._session_db = _FakeDB(home, title)
         self.session_id = "sess-1"
         self._session_title_hint = None
         self._bot_mode_protocol = True
+        self._bot_mode_all_sessions = all_sessions
         self.tools: list = []
         self.valid_tool_names: set = set()
 
@@ -300,6 +301,42 @@ def test_tool_injects_despite_legacy_soul_protocol(tmp_path):
     assert bot_mode_probe.get_bot_mode_protocol_section(home) == ""
     # ...but the install is managed, so the tool must still inject.
     agent = _FakeAgent(home)
+    assert ensure_message_agent_tool(agent) is True
+    assert [t["function"]["name"] for t in agent.tools] == [MESSAGE_AGENT_TOOL_NAME]
+
+
+def test_ordinary_session_has_no_tool_by_default(tmp_path):
+    """The canonical-title gate still holds when the owner has not opted in."""
+    home = _managed_home(tmp_path)
+    agent = _FakeAgent(home, title="Reviewing the webhook diff")
+    assert ensure_message_agent_tool(agent) is False
+    assert agent.tools == []
+    assert MESSAGE_AGENT_TOOL_NAME not in agent.valid_tool_names
+
+
+def test_all_sessions_opt_in_injects_outside_bot_chat(tmp_path):
+    """agent.bot_mode_all_sessions lifts the title gate for every session."""
+    home = _managed_home(tmp_path)
+    agent = _FakeAgent(home, title="Reviewing the webhook diff", all_sessions=True)
+    assert ensure_message_agent_tool(agent) is True
+    assert [t["function"]["name"] for t in agent.tools] == [MESSAGE_AGENT_TOOL_NAME]
+    assert MESSAGE_AGENT_TOOL_NAME in agent.valid_tool_names
+
+
+def test_all_sessions_opt_in_still_requires_a_managed_install(tmp_path):
+    """Opting in must not conjure teammates on a non-Bot-Mode install."""
+    home = tmp_path / "unmanaged"
+    (home / "profiles").mkdir(parents=True)
+    agent = _FakeAgent(home, title="anything", all_sessions=True)
+    assert ensure_message_agent_tool(agent) is False
+    assert agent.tools == []
+
+
+def test_all_sessions_opt_in_is_idempotent_across_turns(tmp_path):
+    """Re-running the per-turn injection must not duplicate the schema."""
+    home = _managed_home(tmp_path)
+    agent = _FakeAgent(home, title="ordinary", all_sessions=True)
+    assert ensure_message_agent_tool(agent) is True
     assert ensure_message_agent_tool(agent) is True
     assert [t["function"]["name"] for t in agent.tools] == [MESSAGE_AGENT_TOOL_NAME]
 

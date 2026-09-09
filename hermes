@@ -6,6 +6,15 @@ This wrapper should behave like the installed `hermes` command, including
 subcommands such as `gateway`, `cron`, and `doctor`.
 """
 
+import sys
+from pathlib import Path
+
+# Pin this file's tree before any import. A shared/symlinked venv editable
+# finder must not pull a different release's hermes_cli.
+_root = str(Path(__file__).resolve().parent)
+if sys.path[:1] != [_root]:
+    sys.path.insert(0, _root)
+
 if __name__ == "__main__":
     from hermes_cli.main import main
     main()

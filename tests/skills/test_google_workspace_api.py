@@ -148,13 +148,14 @@ def test_api_calendar_list_uses_events_list(api_module):
 
 def test_api_get_credentials_refresh_persists_authorized_user_type(api_module, monkeypatch):
     token_path = api_module.TOKEN_PATH
-    _write_token(token_path, token="ya29.old")
+    _write_token(token_path, token="ya29.old", scopes=["https://www.googleapis.com/auth/gmail.readonly"])
 
     class FakeCredentials:
         def __init__(self):
             self.expired = True
             self.refresh_token = "1//refresh"
             self.valid = True
+            self.granted_scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
 
         def refresh(self, request):
             self.expired = False
@@ -172,7 +173,7 @@ def test_api_get_credentials_refresh_persists_authorized_user_type(api_module, m
         @staticmethod
         def from_authorized_user_file(filename, scopes):
             assert filename == str(token_path)
-            assert scopes == api_module.SCOPES
+            assert scopes == ["https://www.googleapis.com/auth/gmail.readonly"]
             return FakeCredentials()
 
     google_module = types.ModuleType("google")

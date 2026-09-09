@@ -14,10 +14,11 @@ import pytest
 
 
 pytest.importorskip("mcp.client.auth.oauth2")
+from tools import mcp_tool_loop as _mcp_loop  # noqa: E402
 
 
 def test_is_auth_error_detects_oauth_flow_error():
-    from tools.mcp_tool import _is_auth_error
+    from tools.mcp_tool_errors import _is_auth_error
     from mcp.client.auth import OAuthFlowError
 
     assert _is_auth_error(OAuthFlowError("expired")) is True
@@ -28,7 +29,7 @@ def test_call_tool_handler_returns_needs_reauth_on_unrecoverable_401(monkeypatch
     handler returns a structured needs_reauth error (not a generic failure)."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-    from tools.mcp_tool import _make_tool_handler
+    from tools.mcp_tool_handlers import _make_tool_handler
     from tools.mcp_oauth_manager import get_manager, reset_manager_for_tests
     from mcp.client.auth import OAuthFlowError
 
@@ -53,7 +54,7 @@ def test_call_tool_handler_returns_needs_reauth_on_unrecoverable_401(monkeypatch
     mcp_tool._server_error_counts.pop("srv", None)
 
     # Ensure the MCP loop exists (run_on_mcp_loop needs it)
-    mcp_tool._ensure_mcp_loop()
+    _mcp_loop._ensure_mcp_loop()
 
     # Force handle_401 to return False (no recovery available)
     mgr = get_manager()
@@ -69,7 +70,14 @@ def test_call_tool_handler_returns_needs_reauth_on_unrecoverable_401(monkeypatch
         parsed = json.loads(result)
         assert parsed.get("needs_reauth") is True, f"expected needs_reauth, got: {parsed}"
         assert parsed.get("server") == "srv"
-        assert "re-auth" in parsed.get("error", "").lower() or "reauth" in parsed.get("error", "").lower()
+        # The verdict is structural now, not a word in the sentence. The message used to name
+        # the recovery in prose ("requires re-authentication", plus a shell command the model
+        # cannot run); a client localizes from ``owner_action``, and the model is told what state
+        # the Connection is in rather than which terminal command to recommend.
+        assert parsed["connection"]["owner_action"] == "reauthorize"
+        assert parsed["connection"]["connection_id"] == "srv"
+        assert parsed["retryable"] is False
+        assert "hermes mcp login" not in parsed.get("error", "")
     finally:
         mcp_tool._servers.pop("srv", None)
         mcp_tool._server_error_counts.pop("srv", None)
@@ -78,7 +86,7 @@ def test_call_tool_handler_returns_needs_reauth_on_unrecoverable_401(monkeypatch
 def test_call_tool_handler_non_auth_error_still_generic(monkeypatch, tmp_path):
     """Non-auth exceptions still surface via the generic error path, not needs_reauth."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    from tools.mcp_tool import _make_tool_handler
+    from tools.mcp_tool_handlers import _make_tool_handler
 
     server = MagicMock()
     server.name = "srv"
@@ -91,9 +99,10 @@ def test_call_tool_handler_non_auth_error_still_generic(monkeypatch, tmp_path):
     server.session = session
 
     from tools import mcp_tool
+    from tools import mcp_tool_loop as _mcp_loop
     mcp_tool._servers["srv"] = server
     mcp_tool._server_error_counts.pop("srv", None)
-    mcp_tool._ensure_mcp_loop()
+    _mcp_loop._ensure_mcp_loop()
 
     try:
         handler = _make_tool_handler("srv", "tool1", 10.0)

@@ -1,13 +1,7 @@
-"""Integration test for the codex_app_server runtime path through AIAgent.
+"""Native Codex adapter protocol compatibility and production scope refusal.
 
-Verifies that:
-  - api_mode='codex_app_server' is accepted on AIAgent construction
-  - run_conversation() takes the early-return path and never enters the
-    chat completions loop
-  - Projected messages from a fake Codex session land in the messages list
-  - tool_iterations from the codex session tick the skill nudge counter
-  - Memory nudge counter ticks once per turn
-  - The returned dict has the same shape as the chat_completions path
+Direct helper tests retain adapter protocol coverage. Production run_conversation
+refuses this runtime until native per-tool scope mediation exists.
 """
 
 from __future__ import annotations
@@ -66,18 +60,35 @@ def _make_codex_agent(**kwargs):
     )
 
 
+def _run_protocol_turn(agent, text):
+    """Exercise only the adapter seam, independently of production admission."""
+    from agent.codex_runtime import run_codex_app_server_turn
+    return run_codex_app_server_turn(agent, user_message=text,
+        original_user_message=text, messages=[{"role": "user", "content": text}],
+        effective_task_id="protocol-fixture")
+
+
+def test_production_turn_refuses_unmediated_codex_runtime(fake_session):
+    agent = _make_codex_agent()
+    with patch.object(CodexAppServerSession, "run_turn") as native_turn:
+        result = agent.run_conversation("run the current task")
+    assert result["failed"] is True
+    assert result["error_type"] == "execution_scope_unsupported_runtime"
+    native_turn.assert_not_called()
+
+
 class TestApiModeAccepted:
     def test_api_mode_is_codex_app_server(self):
         agent = _make_codex_agent()
         assert agent.api_mode == "codex_app_server"
 
 
-class TestRunConversationCodexPath:
-    def test_run_conversation_returns_codex_shape(self, fake_session):
+class TestCodexAdapterProtocol:
+    def test_adapter_returns_codex_shape(self, fake_session):
         agent = _make_codex_agent()
         # No background review fork during tests
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hello there")
+            result = _run_protocol_turn(agent, "hello there")
         assert result["final_response"] == "echo: hello there"
         assert result["completed"] is True
         assert result["partial"] is False
@@ -109,7 +120,7 @@ class TestRunConversationCodexPath:
         )
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hello")
+            result = _run_protocol_turn(agent, "hello")
 
         assert result["api_calls"] == 1
         assert result["prompt_tokens"] == 100
@@ -161,7 +172,7 @@ class TestRunConversationCodexPath:
         agent = _make_codex_agent(event_callback=lambda name, payload: events.append((name, payload)))
 
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hello")
+            result = _run_protocol_turn(agent, "hello")
 
         assert result["completed"] is True
         assert agent.context_compressor.compression_count == 1
@@ -189,7 +200,7 @@ class TestRunConversationCodexPath:
     def test_projected_messages_are_spliced(self, fake_session):
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hello")
+            result = _run_protocol_turn(agent, "hello")
         msgs = result["messages"]
         # User message + 3 projected (assistant tool_call + tool + assistant text)
         assert len(msgs) >= 4
@@ -206,7 +217,7 @@ class TestRunConversationCodexPath:
         agent._memory_manager.build_system_prompt.return_value = ""
 
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hello")
+            result = _run_protocol_turn(agent, "hello")
 
         agent._memory_manager.sync_all.assert_called_once()
         assert agent._memory_manager.sync_all.call_args.kwargs["messages"] == result["messages"]
@@ -220,15 +231,14 @@ class TestRunConversationCodexPath:
         agent._iters_since_skill = 0
         agent._user_turn_count = 0
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("first")
+            _run_protocol_turn(agent, "first")
         assert agent._iters_since_skill == 1  # one tool_iteration in fake turn
-        # _user_turn_count is incremented by run_conversation pre-loop, not
-        # by the codex helper — confirms we delegate that to the standard flow.
-        assert agent._user_turn_count == 1
+        # The adapter owns tool accounting, not production ingress counters.
+        assert agent._user_turn_count == 0
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("second")
+            _run_protocol_turn(agent, "second")
         assert agent._iters_since_skill == 2
-        assert agent._user_turn_count == 2
+        assert agent._user_turn_count == 0
 
     def test_user_message_not_duplicated(self, fake_session):
         """Regression guard: the user message must appear exactly once in
@@ -236,7 +246,7 @@ class TestRunConversationCodexPath:
         it, and the codex helper must NOT append again."""
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("ping unique 12345")
+            result = _run_protocol_turn(agent, "ping unique 12345")
         user_count = sum(
             1 for m in result["messages"]
             if m.get("role") == "user" and m.get("content") == "ping unique 12345"
@@ -252,7 +262,7 @@ class TestRunConversationCodexPath:
         agent._iters_since_skill = 0
         with patch.object(agent, "_spawn_background_review",
                           return_value=None) as spawn:
-            agent.run_conversation("ping")
+            _run_protocol_turn(agent, "ping")
         # Below threshold → review should NOT fire (was a real bug:
         # the helper was calling _spawn_background_review() with no
         # args after every turn, which would crash with TypeError).
@@ -292,7 +302,7 @@ class TestRunConversationCodexPath:
 
         with patch.object(agent, "_spawn_background_review",
                           return_value=None) as spawn:
-            agent.run_conversation("do tool work")
+            _run_protocol_turn(agent, "do tool work")
 
         assert spawn.called, "skill threshold tripped but review didn't fire"
         # Verify the call signature matches what _spawn_background_review
@@ -319,7 +329,7 @@ class TestRunConversationCodexPath:
 
         with patch.object(agent, "_spawn_background_review",
                           return_value=None) as spawn:
-            agent.run_conversation("first")
+            _run_protocol_turn(agent, "first")
         # The fake session reports tool_iterations=1, which trips
         # _skill_nudge_interval=1. So review should fire.
         assert spawn.called
@@ -342,7 +352,7 @@ class TestRunConversationCodexPath:
         with patch.object(agent, "client") as client_mock, patch.object(
             agent, "_spawn_background_review", return_value=None
         ):
-            agent.run_conversation("hi")
+            _run_protocol_turn(agent, "hi")
         assert not client_mock.chat.completions.create.called
 
     def test_gateway_terminal_cwd_seeds_codex_thread_cwd(self, monkeypatch, tmp_path):
@@ -374,7 +384,7 @@ class TestRunConversationCodexPath:
         agent = _make_codex_agent()
         assert not hasattr(agent, "session_cwd")
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("hi")
+            _run_protocol_turn(agent, "hi")
 
         assert captured["cwd"] == str(tmp_path)
 
@@ -419,7 +429,7 @@ class TestRunConversationCodexPath:
             with patch.object(
                 agent, "_spawn_background_review", return_value=None
             ):
-                agent.run_conversation("write something")
+                _run_protocol_turn(agent, "write something")
         routing = captured["request_routing"]
         assert routing.auto_approve_exec is True
         assert routing.auto_approve_apply_patch is True
@@ -438,7 +448,7 @@ class TestRunConversationCodexPath:
             with patch.object(
                 agent, "_spawn_background_review", return_value=None
             ):
-                agent.run_conversation("write something")
+                _run_protocol_turn(agent, "write something")
         routing = captured["request_routing"]
         assert routing.auto_approve_exec is True
         assert routing.auto_approve_apply_patch is True
@@ -457,7 +467,7 @@ class TestRunConversationCodexPath:
             with patch.object(
                 agent, "_spawn_background_review", return_value=None
             ):
-                agent.run_conversation("write something")
+                _run_protocol_turn(agent, "write something")
         routing = captured["request_routing"]
         assert routing.auto_approve_exec is False
         assert routing.auto_approve_apply_patch is False
@@ -481,7 +491,7 @@ class TestRunConversationCodexPath:
             with patch.object(
                 agent, "_spawn_background_review", return_value=None
             ):
-                agent.run_conversation("write something")
+                _run_protocol_turn(agent, "write something")
         routing = captured["request_routing"]
         assert routing.auto_approve_exec is True
         assert routing.auto_approve_apply_patch is True
@@ -503,7 +513,7 @@ class TestRunConversationCodexPath:
             ), patch.object(
                 agent, "_spawn_background_review", return_value=None
             ):
-                agent.run_conversation("write something")
+                _run_protocol_turn(agent, "write something")
         routing = captured["request_routing"]
         assert routing.auto_approve_exec is True
         assert routing.auto_approve_apply_patch is True
@@ -591,7 +601,7 @@ class TestErrorHandling:
 
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hi")
+            result = _run_protocol_turn(agent, "hi")
         assert result["completed"] is False
         assert result["partial"] is True
         assert "subprocess died" in result["error"]
@@ -614,7 +624,7 @@ class TestErrorHandling:
 
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hi")
+            result = _run_protocol_turn(agent, "hi")
         assert result["completed"] is False
         assert result["partial"] is True
         assert result["error"] == "user interrupted"
@@ -649,7 +659,7 @@ class TestSessionRetirementOnRunAgent:
 
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hi")
+            result = _run_protocol_turn(agent, "hi")
 
         # The session was closed and cleared
         assert closes["count"] == 1
@@ -663,7 +673,7 @@ class TestSessionRetirementOnRunAgent:
         The session must stay attached for the next turn to reuse."""
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("hi")
+            _run_protocol_turn(agent, "hi")
         # Session was lazily created and still attached.
         assert getattr(agent, "_codex_session", None) is not None
 
@@ -686,7 +696,7 @@ class TestSessionRetirementOnRunAgent:
 
         agent = _make_codex_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("hi")
+            result = _run_protocol_turn(agent, "hi")
 
         assert closes["count"] == 1
         assert agent._codex_session is None
@@ -782,7 +792,7 @@ class TestCodexToolProgressBridge:
         agent.tool_progress_callback = lambda kind, name, preview, args: events.append(
             (kind, name, preview))
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            agent.run_conversation("run the tests")
+            _run_protocol_turn(agent, "run the tests")
 
         assert "on_event" in captured_init and captured_init["on_event"] is not None
         assert ("tool.started", "exec_command", "pytest") in events

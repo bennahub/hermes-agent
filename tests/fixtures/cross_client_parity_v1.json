@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "contract": "Hermes canonical truth; iOS and macOS may render it natively but must preserve these semantics",
+  "cases": [
+    {
+      "name": "real_owner_message",
+      "row": {"id": 101, "session_id": "chat", "role": "user", "content": "Please review this", "display_metadata": {"client_message_ids": ["11111111-1111-4111-8111-111111111111"], "projection": {"version": 1, "origin": "owner", "audience": "owner", "purpose": "message"}}},
+      "expected": {"semantic_kind": "owner_message", "owner_authored": true, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true}
+    },
+    {
+      "name": "direct_agent_to_owner",
+      "row": {"id": 102, "session_id": "chat", "role": "assistant", "content": "The review is ready", "display_metadata": {"projection": {"version": 1, "origin": "agent", "audience": "owner", "purpose": "result", "source_session_id": "chat"}}},
+      "expected": {"semantic_kind": "agent_message", "owner_authored": false, "owner_notification_eligible": true, "owner_unread_eligible": true, "history_visible": true}
+    },
+    {
+      "name": "a2a_child_acknowledgement",
+      "row": {"id": 103, "session_id": "chat", "role": "assistant", "content": "Acknowledged; checking the totals", "display_kind": "a2a_message", "display_metadata": {"projection": {"version": 1, "origin": "agent", "audience": "peer", "purpose": "collaboration", "sender": "child", "recipient": "parent", "send_id": "reply-1", "event_id": "event-reply-1"}}},
+      "expected": {"semantic_kind": "collaboration", "owner_authored": false, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true, "compact_only": true}
+    },
+    {
+      "name": "compact_collaboration_run",
+      "copies": 2,
+      "row": {"id": 104, "session_id": "chat", "role": "assistant", "content": "Internal exchange body", "display_kind": "a2a_message", "display_metadata": {"a2a_memo": "Internal A2A memo", "collaboration": {"message_count": 4, "agent_count": 1}, "projection": {"version": 1, "origin": "agent", "audience": "peer", "purpose": "collaboration", "process_id": "proc-collab", "event_id": "event-collab"}}},
+      "expected": {"semantic_kind": "collaboration", "owner_authored": false, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true, "compact_only": true, "collaboration_key": "proc-collab", "canonical_card_count": 1}
+    },
+    {
+      "name": "runtime_user_shaped_row",
+      "row": {"id": 105, "session_id": "chat", "role": "user", "content": "[System: background process completed]", "display_kind": "hidden", "display_metadata": {"projection": {"version": 1, "origin": "runtime", "audience": "internal", "purpose": "control", "process_id": "proc-runtime"}}},
+      "expected": {"semantic_kind": "hidden", "owner_authored": false, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": false}
+    },
+    {
+      "name": "continuation_recovery_row",
+      "row": {"id": 106, "session_id": "chat", "role": "user", "content": "[System note: Your previous turn was interrupted mid-run]", "display_kind": "auto_continue", "display_metadata": {"projection": {"version": 1, "origin": "runtime", "audience": "internal", "purpose": "control"}}},
+      "expected": {"semantic_kind": "hidden", "owner_authored": false, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": false}
+    },
+    {
+      "name": "duplicate_optimistic_and_durable_identity",
+      "copies": 2,
+      "row": {"id": 107, "session_id": "chat", "root_session_id": "chat-root", "role": "user", "content": "Send once", "display_metadata": {"client_message_ids": ["22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "22222222-2222-4222-8222-222222222222"], "reply_to": {"message_id": 102, "role": "assistant", "excerpt": "untrusted excerpt must not define identity"}, "projection": {"version": 1, "origin": "owner", "audience": "owner", "purpose": "message"}}},
+      "expected": {"semantic_kind": "owner_message", "owner_authored": true, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true, "durable_row_id": 107, "client_message_id_count": 2, "reply_to_message_id": 102}
+    },
+    {
+      "name": "image_attachment",
+      "row": {"id": 108, "session_id": "chat", "role": "user", "content": "", "display_metadata": {"backend": {"workdir": "/srv/hermes", "nested": {"serverPath": "/private/server/nested.png"}}, "attachments": [{"artifact_id": "artifact-image", "filename": "photo.png", "mime_type": "image/png", "size_bytes": 1200, "kind": "image", "path": "/private/server/photo.png"}], "projection": {"version": 1, "origin": "owner", "audience": "owner", "purpose": "message"}}},
+      "expected": {"semantic_kind": "owner_message", "owner_authored": true, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true, "attachment_count": 1, "path_free": true}
+    },
+    {
+      "name": "pdf_attachment",
+      "row": {"id": 109, "session_id": "chat", "role": "assistant", "content": "Here is the report", "display_metadata": {"attachments": [{"artifact_id": "artifact-pdf", "filename": "report.pdf", "mime_type": "application/pdf", "size_bytes": 3400, "kind": "file"}], "projection": {"version": 1, "origin": "agent", "audience": "owner", "purpose": "result"}}},
+      "expected": {"semantic_kind": "agent_message", "owner_authored": false, "owner_notification_eligible": true, "owner_unread_eligible": true, "history_visible": true, "attachment_count": 1, "path_free": true}
+    },
+    {
+      "name": "multi_attachment_message",
+      "row": {"id": 110, "session_id": "chat", "role": "user", "content": "Use all files", "display_metadata": {"attachment_batch_id": "44444444-4444-4444-8444-444444444444", "client_message_ids": ["44444444-4444-4444-8444-444444444444"], "attachments": [{"artifact_id": "artifact-sheet", "item_id": "item-1", "filename": "figures.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "size_bytes": 8000, "kind": "file"}, {"artifact_id": "artifact-deck", "item_id": "item-2", "filename": "brief.pptx", "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "size_bytes": 9000, "kind": "file"}], "projection": {"version": 1, "origin": "owner", "audience": "owner", "purpose": "message"}}},
+      "expected": {"semantic_kind": "owner_message", "owner_authored": true, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true, "attachment_count": 2, "path_free": true}
+    },
+    {
+      "name": "voice_with_canonical_transcript",
+      "row": {"id": 111, "session_id": "chat", "role": "user", "content": "راجع الأرقام من فضلك", "display_metadata": {"attachments": [{"artifact_id": "artifact-audio", "item_id": "item-audio", "filename": "voice.m4a", "mime_type": "audio/mp4", "size_bytes": 48000, "kind": "file"}], "transcript": {"version": 1, "text": "راجع الأرقام من فضلك", "audio_artifact_id": "artifact-audio", "source": "hermes_stt", "provider": "openai", "model": "whisper-1", "language": "ar", "duration_seconds": 3.2}, "projection": {"version": 1, "origin": "owner", "audience": "owner", "purpose": "message"}}},
+      "expected": {"semantic_kind": "owner_message", "owner_authored": true, "owner_notification_eligible": false, "owner_unread_eligible": false, "history_visible": true, "attachment_count": 1, "transcript_text": "راجع الأرقام من فضلك", "audio_artifact_id": "artifact-audio"}
+    },
+    {
+      "name": "needs_you",
+      "row": {"id": 112, "session_id": "chat", "role": "assistant", "content": "Which account should I use?", "display_kind": "autonomy_owner_notice", "display_metadata": {"demand": {"state": "needs_owner"}, "projection": {"version": 1, "origin": "agent", "audience": "owner", "purpose": "decision", "work_id": "work-1"}}},
+      "expected": {"semantic_kind": "agent_message", "owner_authored": false, "owner_notification_eligible": true, "owner_unread_eligible": true, "history_visible": true}
+    }
+  ]
+}

@@ -1,9 +1,8 @@
-"""Opt-in Agent Computer tools.
+"""Profile-enabled Agent Computer tools.
 
-Ordinary chat does not load this toolset. Enabling it still cannot start
-a computer until the agent explicitly calls ``computer_ensure`` /
-``computer_wake``. Takeover remains owner-only on the authenticated
-gateway contract.
+Schema discovery does not create or wake a computer. The agent explicitly
+calls ``computer_ensure`` / ``computer_wake`` when needed. Takeover remains
+owner-only on the authenticated gateway contract.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from typing import Any
 from gateway.agent_computer import get_contract
 from gateway.agent_computer.contract import agent_from_profile, error_payload
 from gateway.agent_computer.errors import AgentComputerError
-from tools.registry import registry, tool_error
+from tools.registry import no_cache_check_fn, registry, tool_error
 
 
 def _session_profile() -> str:
@@ -47,12 +46,35 @@ def _dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _computer_error(exc: AgentComputerError) -> str:
+    """Retain machine-readable failure semantics without exposing worker internals."""
+    public = error_payload(exc)
+    code = public["error"]
+    details = public.get("details") or {}
+    extra = {"error_code": code}
+    if code == "COMPUTER_CAPACITY_EXHAUSTED":
+        extra.update(retryable=True, outcome="not_started",
+                     recovery="Capacity is temporarily full. Retry shortly. Do not escalate this to the owner.")
+        if isinstance(details.get("max_active_computers"), int):
+            extra["capacity"] = details["max_active_computers"]
+        if isinstance(details.get("active_profiles"), list):
+            extra["active_count"] = len(details["active_profiles"])
+    elif code == "NATIVE_OPERATION_UNCERTAIN":
+        extra.update(retryable=False, outcome="unknown",
+                     recovery="Runtime stopped. Observe and verify state before another action; do not replay uncertain input. Report the failure now.")
+        if details.get("phase") in {"transport", "capture", "text", "key", "chord", "pointer", "wheel", "nav", "shutdown", "release", "ping"}:
+            extra["phase"] = details["phase"]
+        if details.get("failure_kind") in {"transport", "worker", "TimeoutError", "ValueError", "RuntimeError", "OSError"}:
+            extra["failure_kind"] = details["failure_kind"]
+    return tool_error(public["message"], **extra)
+
+
 def computer_ensure(profile_id: str = "") -> str:
     try:
         pid = _profile_id(profile_id)
         return _dump(get_contract().ensure(pid, _principal(pid)))
     except AgentComputerError as exc:
-        return tool_error(error_payload(exc)["message"])
+        return _computer_error(exc)
 
 
 def computer_status(computer_id: str = "", profile_id: str = "") -> str:
@@ -63,7 +85,7 @@ def computer_status(computer_id: str = "", profile_id: str = "") -> str:
             return _dump(contract.ensure(pid, _principal(pid)))
         return _dump(contract.status(computer_id, _principal(pid)))
     except AgentComputerError as exc:
-        return tool_error(error_payload(exc)["message"])
+        return _computer_error(exc)
 
 
 def computer_wake(computer_id: str, profile_id: str = "") -> str:
@@ -71,7 +93,7 @@ def computer_wake(computer_id: str, profile_id: str = "") -> str:
         pid = _profile_id(profile_id)
         return _dump(get_contract().wake(computer_id, _principal(pid)))
     except AgentComputerError as exc:
-        return tool_error(error_payload(exc)["message"])
+        return _computer_error(exc)
 
 
 def computer_observe(
@@ -91,7 +113,7 @@ def computer_observe(
             )
         )
     except AgentComputerError as exc:
-        return tool_error(error_payload(exc)["message"])
+        return _computer_error(exc)
 
 
 def computer_act(
@@ -131,18 +153,30 @@ def computer_act(
             )
         )
     except AgentComputerError as exc:
-        return tool_error(error_payload(exc)["message"])
+        return _computer_error(exc)
 
 
+@no_cache_check_fn
 def check_agent_computer_requirements() -> bool:
-    # Opt-in toolset only. Presence in schema still requires the toolset to
-    # be enabled; this check keeps it off accidental core inclusion.
-    return os.environ.get("HERMES_AGENT_COMPUTER_TOOLS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    # A profile enable/disable is deliberate, not a transient prerequisite
+    # failure: do not retain another profile's or a prior positive TTL result.
+    try:
+        from hermes_constants import assert_named_profile_home_live, get_hermes_home
+        from hermes_cli.config import load_config_readonly
+
+        home = get_hermes_home()
+        if not home.is_dir():
+            return False
+        assert_named_profile_home_live(home)
+        # Preserve the operator override, including explicit false/empty.
+        # An absent variable delegates to this session's effective config.
+        override = os.environ.get("HERMES_AGENT_COMPUTER_TOOLS")
+        if override is not None:
+            return override.strip().lower() in {"1", "true", "yes", "on"}
+        section = load_config_readonly().get("agent_computer") or {}
+        return isinstance(section, dict) and section.get("tools_enabled") is True
+    except Exception:
+        return False
 
 
 _ENSURE_SCHEMA = {

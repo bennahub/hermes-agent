@@ -62,3 +62,11 @@ class InvalidTokenError(AgentComputerError):
 class RevokedError(AgentComputerError):
     code = "IDENTITY_REVOKED"
     http_status = 409
+
+
+class ComputerCapacityError(ConflictError):
+    code = "COMPUTER_CAPACITY_EXHAUSTED"
+
+
+class NativeOperationError(AgentComputerError):
+    code = "NATIVE_OPERATION_UNCERTAIN"

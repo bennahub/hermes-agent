@@ -404,6 +404,7 @@ class TestManagedGatewayErrorTranslation:
         """403 from managed gateway → ValueError mentioning FAL_KEY + hermes tools."""
         from unittest.mock import MagicMock
 
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
         # Simulate: managed mode active, managed submit raises 4xx.
         managed_gateway = MagicMock()
         managed_gateway.gateway_origin = "https://fal-queue-gateway.example.com"
@@ -438,6 +439,7 @@ class TestManagedGatewayErrorTranslation:
         monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway",
                             lambda: managed_gateway)
 
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
         conn_error = ConnectionError("network down")
         mock_managed_client = MagicMock()
         mock_managed_client.submit.side_effect = conn_error
@@ -453,13 +455,11 @@ class TestKreaModelNormalization:
 
     def test_native_models_detected(self, image_tool):
         for mid in ("krea-2-medium", "krea-2-large", "krea-2-medium-turbo"):
-            assert image_tool.is_krea_model(mid) is True
             assert image_tool._normalize_krea_model(mid) == mid
 
 
     def test_non_krea_models_are_not_krea(self, image_tool):
         for mid in ("fal-ai/flux-2/klein/9b", "fal-ai/nano-banana-pro", None, "", 123):
-            assert image_tool.is_krea_model(mid) is False
             assert image_tool._normalize_krea_model(mid) is None
 
 

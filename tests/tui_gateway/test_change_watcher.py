@@ -139,6 +139,84 @@ def test_rate_limit_churn_does_not_broadcast_pairing_changed(watcher_home):
     assert ("pairing.changed", {}) not in events
 
 
+def test_a_deleted_agent_broadcasts_profiles_changed(watcher_home):
+    """Delete on one device, gone on the other: the roster's shape is the shared signal."""
+    home, events = watcher_home
+    (home / "profiles" / "faisal").mkdir(parents=True)
+    server._broadcast_watched_changes(now=0.0)
+
+    from hermes_constants import mark_named_profile_deleted
+    import shutil
+
+    mark_named_profile_deleted(home / "profiles" / "faisal")
+    shutil.rmtree(home / "profiles" / "faisal")
+    server._broadcast_watched_changes(now=10.0)
+
+    assert ("profiles.changed", {}) in events
+
+
+def test_a_created_agent_broadcasts_profiles_changed(watcher_home):
+    home, events = watcher_home
+    (home / "profiles").mkdir()
+    server._broadcast_watched_changes(now=0.0)
+
+    (home / "profiles" / "faisal").mkdir()
+    server._broadcast_watched_changes(now=10.0)
+
+    assert ("profiles.changed", {}) in events
+
+
+def test_a_stale_mkdir_under_a_deleted_name_does_not_flap_profiles_changed(watcher_home):
+    """A serve/logging path that has not noticed the delete can mkdir the name back. The
+    roster does not show it, so the watcher must not tell every device the roster changed —
+    it listed raw directory entries and counted the tombstoned name as live."""
+    home, events = watcher_home
+    from hermes_constants import mark_named_profile_deleted
+    import shutil
+
+    (home / "profiles" / "faisal").mkdir(parents=True)
+    mark_named_profile_deleted(home / "profiles" / "faisal")
+    shutil.rmtree(home / "profiles" / "faisal")
+    server._broadcast_watched_changes(now=0.0)
+    events.clear()
+
+    (home / "profiles" / "faisal" / "logs").mkdir(parents=True)  # the stale mkdir
+    server._broadcast_watched_changes(now=10.0)
+
+    assert [ev for ev, _ in events if ev == "profiles.changed"] == []
+
+
+def test_a_recreated_name_after_a_tombstone_still_broadcasts_profiles_changed(watcher_home):
+    """Filtering tombstones must not swallow the real recreate: clearing the tombstone puts
+    the name back in the live set."""
+    home, events = watcher_home
+    from hermes_constants import clear_named_profile_deleted, mark_named_profile_deleted
+    import shutil
+
+    (home / "profiles" / "faisal").mkdir(parents=True)
+    mark_named_profile_deleted(home / "profiles" / "faisal")
+    shutil.rmtree(home / "profiles" / "faisal")
+    server._broadcast_watched_changes(now=0.0)
+    events.clear()
+
+    (home / "profiles" / "faisal").mkdir(parents=True)
+    clear_named_profile_deleted(home / "profiles" / "faisal")
+    server._broadcast_watched_changes(now=10.0)
+
+    assert ("profiles.changed", {}) in events
+
+
+def test_an_unchanged_roster_never_broadcasts_profiles_changed(watcher_home):
+    home, events = watcher_home
+    (home / "profiles" / "faisal").mkdir(parents=True)
+    server._broadcast_watched_changes(now=0.0)
+
+    (home / "profiles" / "faisal" / "state.db").write_text("busy")
+    server._broadcast_watched_changes(now=10.0)
+
+    assert [ev for ev, _ in events if ev == "profiles.changed"] == []
+
+
 def test_sessions_floor_coalesces_burst_but_keeps_trailing_edge(watcher_home):
     home, events = watcher_home
     server._broadcast_watched_changes(now=0.0)

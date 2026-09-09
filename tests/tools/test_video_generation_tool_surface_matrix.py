@@ -100,9 +100,10 @@ def matrix_env(tmp_path, monkeypatch):
     async def _no_sleep(*a, **k): return None
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
 
-    # Reset FAL plugin's lazy fal_client cache so it picks up the stub
+    # Supply the fake SDK at the lazy cache seam; adapter routing remains real
     from plugins.video_gen import fal as fal_plugin
-    fal_plugin._fal_client = None
+    monkeypatch.setattr(fal_plugin, "_fal_client", fake_fal)
+    monkeypatch.setattr("tools.fal_common.import_fal_client", lambda: fake_fal)
 
     # Force discovery
     from hermes_cli.plugins import _ensure_plugins_discovered

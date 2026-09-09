@@ -1802,10 +1802,12 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "tools.voice_mode",
-        types.SimpleNamespace(
-            check_voice_requirements=lambda: {"available": True, "details": ""},
-            voice_stop_hint=lambda: 'Say "halt" to end the voice chat.',
-        ),
+        types.SimpleNamespace(check_voice_requirements=lambda: {"available": True, "details": ""}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.voice_mode_transcript",
+        types.SimpleNamespace(voice_stop_hint=lambda: 'Say "halt" to end the voice chat.'),
     )
     monkeypatch.setenv("HERMES_VOICE", "0")
 
@@ -1817,11 +1819,8 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     # Disabled stop phrases → empty hint, clients show nothing.
     monkeypatch.setitem(
         sys.modules,
-        "tools.voice_mode",
-        types.SimpleNamespace(
-            check_voice_requirements=lambda: {"available": True, "details": ""},
-            voice_stop_hint=lambda: "",
-        ),
+        "tools.voice_mode_transcript",
+        types.SimpleNamespace(voice_stop_hint=lambda: ""),
     )
     on_resp = _dispatch_sync(
         {"id": "voice-on2", "method": "voice.toggle", "params": {"action": "on"}}
@@ -3937,7 +3936,7 @@ def test_session_resume_profile_uses_profile_db_cwd(monkeypatch, tmp_path):
 
     monkeypatch.setenv("TERMINAL_CWD", str(launch_cwd))
     monkeypatch.setattr(server, "_profile_home", lambda _profile: profile_home)
-    monkeypatch.setattr("hermes_state.get_shared_session_db", lambda db_path=None: profile_db)
+    monkeypatch.setattr("hermes_state_registry.acquire", lambda db_path=None: profile_db)
     monkeypatch.setattr(server, "_get_db", lambda: launch_db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda target: [])
@@ -3999,11 +3998,11 @@ def test_session_cwd_set_profile_session_updates_profile_db(monkeypatch, tmp_pat
 
     profile_db = ProfileDB()
 
-    import tools.terminal_tool as terminal_tool
+    import tools.terminal_tool_lifecycle as terminal_tool_lifecycle
 
-    monkeypatch.setattr("hermes_state.get_shared_session_db", lambda db_path=None: profile_db)
+    monkeypatch.setattr("hermes_state_registry.acquire", lambda db_path=None: profile_db)
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr(terminal_tool, "cleanup_vm", lambda _key: None)
+    monkeypatch.setattr(terminal_tool_lifecycle, "cleanup_vm", lambda _key: None)
     monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
 
     session = {"session_key": target, "profile_home": str(profile_home)}
@@ -4645,6 +4644,55 @@ def _session(agent=None, **extra):
         "tool_progress_mode": "all",
         **extra,
     }
+
+
+def test_reasoning_delta_is_suppressed_when_show_reasoning_is_off(monkeypatch):
+    """display.show_reasoning=false must stop 'Thought' blocks reaching Desktop."""
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    server._sessions["sid"] = _session(show_reasoning=False)
+    try:
+        server._on_reasoning_delta("sid", "internal deliberation")
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert [e for e in emitted if e[0] == "reasoning.delta"] == []
+
+
+def test_reasoning_delta_still_flows_when_show_reasoning_is_on(monkeypatch):
+    """The toggle must not be a blanket kill switch."""
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    server._sessions["sid"] = _session(show_reasoning=True)
+    try:
+        server._on_reasoning_delta("sid", "internal deliberation")
+    finally:
+        server._sessions.pop("sid", None)
+
+    deltas = [e for e in emitted if e[0] == "reasoning.delta"]
+    assert [d[2].get("text") for d in deltas] == ["internal deliberation"]
+
+
+def test_inline_diff_is_omitted_when_inline_diffs_disabled(monkeypatch):
+    """display.inline_diffs=false must stop code/diff panels reaching Desktop."""
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"display": {"inline_diffs": False}})
+    assert server._load_inline_diffs() is False
+
+
+def test_inline_diffs_default_on_and_respects_explicit_true(monkeypatch):
+    """Absent key keeps today's behaviour; explicit true stays on."""
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    assert server._load_inline_diffs() is True
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"display": {"inline_diffs": True}})
+    assert server._load_inline_diffs() is True
 
 
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
@@ -7022,7 +7070,9 @@ def test_notification_poller_live_loop_requeues_foreign_completion_for_owner(
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **_kwargs: emitted.append(args))
 
-    def _deliver(_rid, sid, session, text):
+    def _deliver(_rid, sid, session, text, **metadata):
+        assert metadata['display_kind'] == 'hidden'
+        assert metadata['display_metadata']['projection']['origin'] == 'runtime'
         delivered["a" if sid == "sid-a-live-handoff" else "b"].append(text)
         session["running"] = False
 
@@ -7238,7 +7288,7 @@ def test_notification_poller_delivers_owned_events(
     monkeypatch.setattr(
         server,
         "_run_prompt_submit",
-        lambda _rid, _sid, _session, text: delivered.append(text),
+        lambda _rid, _sid, _session, text, **metadata: delivered.append(text),
     )
     monkeypatch.setattr(server, "_get_db", lambda: _CompressionDB())
 
@@ -7271,6 +7321,59 @@ def test_notification_poller_delivers_owned_events(
         server._sessions.pop("sid_a", None)
         while not process_registry.completion_queue.empty():
             process_registry.completion_queue.get_nowait()
+
+
+@pytest.mark.parametrize("delivery_phase", ["live", "shutdown"])
+def test_notification_poller_hides_async_delegation_payload_from_chat(
+    monkeypatch, delivery_phase
+):
+    """Live and shutdown drains wake the agent without painting the envelope."""
+    import queue as _queue_mod
+
+    from tools.process_registry import process_registry
+
+    delivered = []
+    emitted = []
+    sess = _session(session_key="session-a")
+    server._sessions["sid-a"] = sess
+    monkeypatch.setattr(
+        server, "_emit", lambda *args, **_kwargs: emitted.append(args)
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        lambda _rid, _sid, _session, text, **kwargs: delivered.append(
+            (text, kwargs)
+        ),
+    )
+
+    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
+    event = {
+        "type": "async_delegation",
+        "delegation_id": "deleg_hidden_payload",
+        "session_key": "session-a",
+        "origin_ui_session_id": "sid-a",
+        "results": [{"status": "completed", "result": "PASS"}],
+    }
+    isolated_queue.put(event)
+    if delivery_phase == "live":
+        stop = _StopAfterOneNotificationPoll()
+    else:
+        stop = threading.Event()
+        stop.set()
+
+    try:
+        server._notification_poller_loop(stop, "sid-a", sess)
+        assert len(delivered) == 1
+        assert delivered[0][0].startswith("[ASYNC DELEGATION")
+        assert delivered[0][1]["display_kind"] == "hidden"
+        assert [args for args in emitted if args[0] == "status.update"] == []
+    finally:
+        server._sessions.pop("sid-a", None)
+        while not isolated_queue.empty():
+            isolated_queue.get_nowait()
 
 
 def _configure_immediate_prompt_run(
@@ -7505,6 +7608,58 @@ def test_run_prompt_submit_delivers_completion_observed_by_poll(monkeypatch, tmp
         server._sessions.pop("sid_a", None)
         process_registry._completion_consumed.discard(event["session_id"])
         process_registry._poll_observed.discard(event["session_id"])
+
+
+def test_post_turn_drain_hides_async_delegation_payload(monkeypatch, tmp_path):
+    """A child finishing mid-turn wakes the agent without painting its envelope."""
+    import queue as _queue_mod
+
+    from tools.process_registry import process_registry
+
+    original_submit = server._run_prompt_submit
+    nested = []
+
+    class _SwitchingAgent(_RecordingAgent):
+        def run_conversation(self, prompt, **kwargs):
+            self._turns.append(prompt)
+            monkeypatch.setattr(
+                server,
+                "_run_prompt_submit",
+                lambda _rid, _sid, _session, text, **inner_kwargs: nested.append(
+                    (text, inner_kwargs)
+                ),
+            )
+            return {"final_response": "", "messages": []}
+
+    _configure_immediate_prompt_run(monkeypatch, tmp_path)
+    turns = []
+    session = _session(
+        session_key="session-a",
+        agent=_SwitchingAgent(turns),
+        running=True,
+    )
+    event = {
+        "type": "async_delegation",
+        "delegation_id": "deleg_mid_turn_hidden",
+        "session_key": "session-a",
+        "origin_ui_session_id": "sid-a",
+        "results": [{"status": "completed", "result": "PASS"}],
+    }
+    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    isolated_queue.put(event)
+    monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
+    server._sessions["sid-a"] = session
+
+    try:
+        original_submit("rid-a", "sid-a", session, "owner turn")
+        assert turns == ["owner turn"]
+        assert len(nested) == 1
+        assert nested[0][0].startswith("[ASYNC DELEGATION")
+        assert nested[0][1]["display_kind"] == "hidden"
+    finally:
+        server._sessions.pop("sid-a", None)
+        while not isolated_queue.empty():
+            isolated_queue.get_nowait()
 
 
 def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_threading(
@@ -7896,7 +8051,7 @@ def test_ensure_session_db_row_stamps_profile_name(monkeypatch, tmp_path):
         def close(self):
             pass
 
-    monkeypatch.setattr("hermes_state.get_shared_session_db", _ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", _ProfileDB)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
     server._ensure_session_db_row(
@@ -9793,7 +9948,7 @@ def test_config_set_model_recovers_failed_profile_resume_after_build_completes(
         "hermes_cli.model_selection_guards.combined_selection_warning",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr("hermes_state.get_shared_session_db", FakeDb)
+    monkeypatch.setattr("hermes_state_registry.acquire", FakeDb)
     monkeypatch.setattr(server, "_make_agent", fake_make_agent)
     monkeypatch.setattr(server, "_transfer_db_to_agent", barrier_transfer)
     monkeypatch.setattr(
@@ -11528,7 +11683,7 @@ def test_plugins_list_surfaces_loader_error(monkeypatch):
 
 def test_complete_slash_surfaces_completer_error(monkeypatch):
     with patch(
-        "hermes_cli.commands.SlashCommandCompleter",
+        "hermes_cli.commands_completion.SlashCommandCompleter",
         side_effect=Exception("no completer"),
     ):
         resp = server.handle_request(
@@ -12089,6 +12244,20 @@ def test_inflight_snapshot_omits_corrections_when_none_recorded():
     assert "corrections" not in snapshot
 
 
+def test_inflight_snapshot_omits_hidden_synthetic_user_text():
+    session = {}
+    server._start_inflight_turn(
+        session,
+        "[ASYNC DELEGATION BATCH COMPLETE — internal]",
+        display_kind="hidden",
+    )
+
+    snapshot = server._inflight_snapshot(session)
+    assert snapshot is not None
+    assert snapshot["user"] == ""
+    assert snapshot["streaming"] is True
+
+
 def test_new_turn_does_not_inherit_prior_turn_corrections():
     session = {}
     server._start_inflight_turn(session, "first prompt")
@@ -12151,9 +12320,9 @@ def test_session_info_includes_mcp_servers(monkeypatch):
         {"name": "filesystem", "transport": "stdio", "tools": 4, "connected": True},
         {"name": "broken", "transport": "stdio", "tools": 0, "connected": False},
     ]
-    fake_mod = types.ModuleType("tools.mcp_tool")
+    fake_mod = types.ModuleType("tools.mcp_tool_discovery")
     fake_mod.get_mcp_status = lambda: fake_status
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool", fake_mod)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_discovery", fake_mod)
 
     info = server._session_info(types.SimpleNamespace(tools=[], model="", provider="openai-codex"))
 
@@ -14621,8 +14790,10 @@ def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
     def _broken_shared(_db_path=None):
         raise RuntimeError("locking protocol")
 
-    fake_mod.get_shared_session_db = _broken_shared
     monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
+    fake_registry = types.ModuleType("hermes_state_registry")
+    fake_registry.acquire = _broken_shared
+    monkeypatch.setitem(sys.modules, "hermes_state_registry", fake_registry)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
 
@@ -14644,8 +14815,10 @@ def test_ensure_session_db_row_false_when_store_unavailable(monkeypatch):
     def _broken_shared(_db_path=None):
         raise RuntimeError("utf-8 boom")
 
-    fake_mod.get_shared_session_db = _broken_shared
     monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
+    fake_registry = types.ModuleType("hermes_state_registry")
+    fake_registry.acquire = _broken_shared
+    monkeypatch.setitem(sys.modules, "hermes_state_registry", fake_registry)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
 
@@ -14997,7 +15170,7 @@ def test_session_list_honors_params_profile_opens_profile_db(monkeypatch, tmp_pa
 
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
 
     resp = server.handle_request(
         {
@@ -15038,7 +15211,7 @@ def test_session_most_recent_honors_params_profile(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB2)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB2)
 
     resp = server.handle_request(
         {
@@ -15165,7 +15338,7 @@ def test_session_delete_honors_params_profile_sessions_dir(monkeypatch, tmp_path
 
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
 
     resp = server.handle_request(
         {
@@ -15232,7 +15405,7 @@ def test_session_title_uses_session_profile_db_not_launch(monkeypatch, tmp_path)
         "last_active": 1.0,
     }
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     try:
         set_resp = server.handle_request(
             {
@@ -15289,7 +15462,7 @@ def test_session_history_uses_session_profile_db(monkeypatch, tmp_path):
         "last_active": 1.0,
     }
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.history", "params": {"session_id": "sid"}}
@@ -15376,7 +15549,7 @@ def test_session_status_uses_session_profile_db(monkeypatch, tmp_path):
         "last_active": 1.0,
     }
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.status", "params": {"session_id": "sid"}}
@@ -15418,7 +15591,7 @@ def test_teardown_ends_session_in_profile_db(monkeypatch, tmp_path):
             seen["closed"] = True
 
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     session = {
         "session_key": "ml-sess",
         "profile_home": str(profile_home),
@@ -15511,7 +15684,7 @@ def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
     }
     server._sessions["parent"] = parent
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
 
     def _fake_make_agent(*a, **k):
@@ -15933,7 +16106,7 @@ def test_session_branch_installs_parent_profile_secret_scope(monkeypatch, tmp_pa
     }
     server._sessions["parent"] = parent
     monkeypatch.setattr(server, "_get_db", lambda: ProfileDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
 
     def _fake_make_agent(*a, **k):
@@ -16050,7 +16223,7 @@ def test_session_branch_uses_persisted_display_history_after_compaction(monkeypa
     }
     server._sessions["parent"] = parent
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *args, **kwargs: (None, None))
     monkeypatch.setattr(server, "_make_agent", lambda *args, **kwargs: FakeAgent())
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: {})
@@ -16110,7 +16283,7 @@ def test_pending_title_finalizer_uses_session_profile_db(monkeypatch, tmp_path):
             seen["closed"] = True
 
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     session = {
         "session_key": "ml-sess",
         "pending_title": "deferred-title",
@@ -16558,6 +16731,243 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     # Text stays empty — we did NOT fabricate an "Error:" string
     text = payload.get("text", "")
     assert text in {"", None}, f"expected empty text, got {text!r}"
+
+
+def test_prompt_submit_never_emits_exact_silent_marker(monkeypatch):
+    """Desktop receives an empty terminal frame, never the control token."""
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            assert stream_callback is not None
+            for delta in ("\n", "[", "SIL", "ENT]"):
+                stream_callback(delta)
+            return {
+                "final_response": "[SILENT]",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "[SILENT]"},
+                ],
+                "api_calls": 1,
+                "completed": True,
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "background completion"},
+        }
+    )
+
+    complete_events = [e for e in emitted if e[0] == "message.complete"]
+    delta_events = [e for e in emitted if e[0] == "message.delta"]
+    assert complete_events
+    assert delta_events == []
+    assert complete_events[-1][2].get("status") == "complete"
+    assert complete_events[-1][2].get("text") == ""
+    history = server._sessions["sid"]["history"]
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert history[-1]["content"] == ""
+    assert history[-1]["api_content"] == "[SILENT]"
+    assert history[-1]["display_kind"] == "control"
+
+
+def test_prompt_submit_failed_result_hides_marker_and_surfaces_error(monkeypatch):
+    """A failure cannot use a silence token to hide its real error."""
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            assert stream_callback is not None
+            for delta in ("NO_", "REPLY"):
+                stream_callback(delta)
+            return {
+                "final_response": "NO_REPLY",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "NO_REPLY"},
+                ],
+                "api_calls": 1,
+                "completed": False,
+                "failed": True,
+                "error": "provider denied the request",
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "trigger failure"},
+        }
+    )
+
+    delta_events = [e for e in emitted if e[0] == "message.delta"]
+    complete = [e[2] for e in emitted if e[0] == "message.complete"][-1]
+    assert delta_events == []
+    assert complete.get("status") == "error"
+    assert complete.get("text") == "Error: provider denied the request"
+    assert complete.get("error") == "provider denied the request"
+    assert "NO_REPLY" not in str(emitted)
+
+
+def test_prompt_submit_rearms_silence_probe_at_provider_segment_boundary(monkeypatch):
+    """Post-tool final silence must not leak after ordinary commentary streamed."""
+
+    class _Agent:
+        interim_assistant_callback = None
+
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            assert stream_callback is not None
+            stream_callback("Working")
+            # Mirror the real loop's dedicated provider/tool boundary hook.
+            assert callable(self.stream_segment_boundary_callback)
+            self.stream_segment_boundary_callback()
+            if callable(self.interim_assistant_callback):
+                self.interim_assistant_callback("[SILENT]", already_streamed=False)
+            for delta in ("[", "SIL", "ENT]"):
+                stream_callback(delta)
+            return {
+                "final_response": "[SILENT]",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "[SILENT]"},
+                ],
+                "api_calls": 2,
+                "completed": True,
+            }
+
+    agent = _Agent()
+    boundaries = []
+    previous_segment_boundary_callback = lambda: boundaries.append(None)
+    agent.stream_segment_boundary_callback = previous_segment_boundary_callback
+    server._sessions["sid"] = _session(agent=agent)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "check tools"},
+        }
+    )
+
+    deltas = [e[2].get("text", "") for e in emitted if e[0] == "message.delta"]
+    interims = [e[2].get("text", "") for e in emitted if e[0] == "message.interim"]
+    complete = [e[2] for e in emitted if e[0] == "message.complete"][-1]
+    assert "".join(deltas) == "Working"
+    assert interims == []
+    assert complete.get("text") == ""
+    assert boundaries == [None]
+    assert agent.stream_segment_boundary_callback is previous_segment_boundary_callback
+
+
+def test_prompt_submit_flushes_ordinary_text_after_silence_prefix_probe(monkeypatch):
+    """Holding a possible marker prefix must not swallow normal streamed prose."""
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            assert stream_callback is not None
+            for delta in ("S", "audi ready"):
+                stream_callback(delta)
+            return {
+                "final_response": "Saudi ready",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "Saudi ready"},
+                ],
+                "api_calls": 1,
+                "completed": True,
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "status"},
+        }
+    )
+
+    deltas = [e[2].get("text", "") for e in emitted if e[0] == "message.delta"]
+    complete = [e for e in emitted if e[0] == "message.complete"][-1][2]
+    assert "".join(deltas) == "Saudi ready"
+    assert complete.get("text") == "Saudi ready"
+
+
+def test_prompt_submit_flushes_held_prefix_when_agent_raises(monkeypatch):
+    """A failed turn must not lose ordinary text held during marker probing."""
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            assert stream_callback is not None
+            stream_callback("S")
+            raise RuntimeError("provider crashed")
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "status"},
+        }
+    )
+
+    deltas = [e[2].get("text", "") for e in emitted if e[0] == "message.delta"]
+    assert "".join(deltas) == "S"
 
 
 # ── active live TUI sessions ─────────────────────────────────────────
@@ -17092,7 +17502,7 @@ def test_browser_manage_status_does_not_call_get_cdp_override(monkeypatch):
             "_get_cdp_override must not run on /browser status (network I/O)"
         )
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "status"}}
         )
@@ -17115,7 +17525,7 @@ def test_browser_manage_connect_sets_env_and_cleans_twice(monkeypatch):
         cleanup_all_browsers=_cleanup_all,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17141,7 +17551,7 @@ def test_browser_manage_connect_defaults_to_loopback(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         urls = _stub_urlopen_capture(monkeypatch, ok=True)
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "connect"}}
@@ -17171,7 +17581,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=False)
         with (
             patch(
@@ -17230,7 +17640,7 @@ def test_browser_manage_connect_no_session_skips_progress_events(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=False)
         with (
             patch(
@@ -17265,7 +17675,7 @@ def test_browser_manage_connect_handles_null_url(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17327,7 +17737,7 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
     launched = ChromeDebugLaunch(launched=True)
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with (
             patch(
                 "hermes_cli.browser_connect.launch_chrome_debug",
@@ -17375,7 +17785,7 @@ def test_browser_manage_connect_finds_ipv6_only_browser(monkeypatch):
     import urllib.request
 
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "connect"}}
         )
@@ -17419,7 +17829,7 @@ def test_browser_manage_connect_squatted_port_launches_on_alternate(monkeypatch)
         launch_ports.append(port)
         return ChromeDebugLaunch(launched=True)
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with (
             patch("hermes_cli.browser_connect.launch_chrome_debug", side_effect=_launch),
             patch("hermes_cli.browser_connect.local_port_in_use", return_value=True),
@@ -17446,7 +17856,7 @@ def test_browser_manage_connect_rejects_unreachable_endpoint(monkeypatch):
         ),
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=False)
         resp = server.handle_request(
             {
@@ -17471,7 +17881,7 @@ def test_browser_manage_connect_normalizes_bare_host_port(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17497,7 +17907,7 @@ def test_browser_manage_connect_strips_discovery_path(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17529,7 +17939,7 @@ def test_browser_manage_connect_preserves_devtools_browser_endpoint(monkeypatch)
         def __exit__(self, *a):
             return False
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         # If urlopen is reached for a concrete ws endpoint, the test
         # would still pass because _stub_urlopen returned ok=True before;
         # patch it to assert-fail so we prove the HTTP probe is skipped.
@@ -17568,7 +17978,7 @@ def test_browser_manage_connect_local_devtools_ws_preserves_path(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with patch("socket.create_connection", return_value=_OkSocket()):
             resp = server.handle_request(
                 {
@@ -17637,7 +18047,7 @@ def test_browser_manage_connect_concrete_ws_skips_http_probe(monkeypatch):
         seen_targets.append(addr)
         return _OkSocket()
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         # urlopen would 404/ECONNREFUSED on a real hosted CDP endpoint;
         # asserting it's never called proves the probe was skipped.
         with patch(
@@ -17668,7 +18078,7 @@ def test_browser_manage_connect_concrete_ws_tcp_unreachable(monkeypatch):
     )
     concrete = "ws://offline.example/devtools/browser/missing"
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with patch("socket.create_connection", side_effect=OSError("ECONNREFUSED")):
             resp = server.handle_request(
                 {
@@ -17691,7 +18101,7 @@ def test_browser_manage_disconnect_drops_env_and_cleans(monkeypatch):
         ),
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "disconnect"}}
         )
@@ -18321,7 +18731,9 @@ def test_notification_poller_emits_distinct_watch_matches_once(monkeypatch):
     turns = []
     emitted = []
 
-    def _fake_run_prompt_submit(rid, sid, session, text):
+    def _fake_run_prompt_submit(rid, sid, session, text, **metadata):
+        assert metadata['display_kind'] == 'hidden'
+        assert metadata['display_metadata']['projection']['origin'] == 'runtime'
         turns.append(text)
         with session["history_lock"]:
             session["running"] = False
@@ -20071,11 +20483,15 @@ def _fake_tts_modules(monkeypatch, *, requirements=True, playback_stops=None, li
         "tools.tts_tool",
         types.SimpleNamespace(
             check_tts_requirements=lambda: requirements,
-            stream_tts_to_speaker=fake_stream,
             _get_provider=lambda cfg: "edge",
             _load_tts_config=lambda: {},
             get_env_value=lambda key, default="": default,
         ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.tts_tool_speaker",
+        types.SimpleNamespace(stream_tts_to_speaker=fake_stream),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -20726,7 +21142,7 @@ def test_fallback_session_info_reports_session_cwd_not_launch_dir(monkeypatch):
     wrong project for any session resumed without a built agent (#71254).
     """
     monkeypatch.setattr(server, "_default_session_cwd", lambda: "/gateway/launch/dir")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "bb/feature")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "bb/feature")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
@@ -20743,7 +21159,7 @@ def test_fallback_session_info_always_emits_branch(monkeypatch):
     after switching into a non-git session.
     """
     monkeypatch.setattr(server, "_default_session_cwd", lambda: "/gateway/launch/dir")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
@@ -22238,13 +22654,13 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_profile_db", _fake_db)
     monkeypatch.setattr(
-        server,
-        "_git_branch_for_cwd",
+        server.git_probe,
+        "branch",
         lambda cwd: "main",
     )
     monkeypatch.setattr(
-        server,
-        "_git_common_repo_root_for_cwd",
+        server.git_probe,
+        "common_repo_root",
         lambda cwd: str(new_cwd),
     )
 

@@ -383,7 +383,7 @@ def get_auth_url():
     print(auth_url)
 
 
-def exchange_auth_code(code: str):
+def exchange_auth_code(code: str, *, require_granted_scopes: bool = False):
     """Exchange the authorization code for a token and save it."""
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
@@ -432,6 +432,8 @@ def exchange_auth_code(code: str):
     # creds.to_json() writes the requested scopes, which causes refresh to fail
     # with invalid_scope if the user only authorized a subset.
     actually_granted = list(creds.granted_scopes or []) if hasattr(creds, "granted_scopes") and creds.granted_scopes else []
+    if require_granted_scopes and not set(SCOPES).issubset(actually_granted):
+        raise ValueError("google_granted_scopes_required")
     if actually_granted:
         token_payload["scopes"] = actually_granted
     elif granted_scopes != SCOPES:

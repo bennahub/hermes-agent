@@ -186,6 +186,8 @@ def test_managed_fal_submit_uses_gateway_origin_and_nous_token(monkeypatch):
         "tools.image_generation_tool",
         "image_generation_tool.py",
     )
+    # Supply the already installed test SDK at the native lazy-client seam.
+    monkeypatch.setattr(image_generation_tool, "fal_client", sys.modules["fal_client"])
     monkeypatch.setattr(image_generation_tool.uuid, "uuid4", lambda: "fal-submit-123")
     
     image_generation_tool._submit_fal_request(
@@ -212,7 +214,7 @@ def test_openai_tts_uses_managed_audio_gateway_when_direct_key_absent(monkeypatc
     monkeypatch.setenv("TOOL_GATEWAY_USER_TOKEN", "nous-token")
 
     tts_tool = _load_tool_module("tools.tts_tool", "tts_tool.py")
-    monkeypatch.setattr(tts_tool.uuid, "uuid4", lambda: "tts-call-123")
+    monkeypatch.setattr(sys.modules["tools.tts_tool_openai"].uuid, "uuid4", lambda: "tts-call-123")
     output_path = tmp_path / "speech.mp3"
     tts_tool._generate_openai_tts("hello world", str(output_path), {"openai": {}})
 

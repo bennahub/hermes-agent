@@ -217,6 +217,52 @@ def _runner_parts(command):
     return parts[marker + 1], parts[marker + 2], parts[marker + 3 :]
 
 
+def test_live_desktop_dispatcher_handles_local_delivery_without_cli(tmp_path, monkeypatch):
+    """A recipient Bot Chat already owned by this Desktop must be driven by
+    that live owner, not by a second ``hermes -p`` process that ownership
+    fencing will correctly reject."""
+    calls = _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, teammates=("researcher",))
+    agent = _FakeAgent(home, title="Bot Chat")
+    dispatched = []
+
+    def dispatch(profile, prompt, *, display_metadata=None):
+        dispatched.append((profile, prompt, display_metadata))
+        return True
+
+    setattr(agent, "_message_agent_dispatcher", dispatch)
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(
+            target="researcher", message="status update", agent=agent
+        )
+    )
+
+    assert result["status"] == "sent"
+    assert result["to"] == "@researcher"
+    assert result["transport"] == "live_session"
+    assert calls == [], "live-session delivery must not spawn a competing CLI owner"
+    assert dispatched[0][:2] == (
+        "researcher", "Message from 🤖 hermes (@hermes): status update"
+    )
+    assert dispatched[0][2]["projection"]["audience"] == "peer"
+
+
+def test_live_desktop_dispatcher_falls_back_when_target_is_not_live(tmp_path, monkeypatch):
+    calls = _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, teammates=("researcher",))
+    agent = _FakeAgent(home, title="Bot Chat")
+    setattr(agent, "_message_agent_dispatcher", lambda _profile, _prompt: False)
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target="researcher", message="status", agent=agent)
+    )
+
+    assert result["status"] == "sent"
+    assert result["process_id"] == "proc_test1234"
+    assert len(calls) == 1
+
+
 def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
     calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher",))
@@ -353,6 +399,8 @@ def test_spawn_failure_reports_error(tmp_path, monkeypatch):
     )
     assert "error" in result
     assert "could not be started" in result["error"]
+    from gateway.a2a_threads import read_thread, thread_id
+    assert read_thread(home, thread=thread_id("default", "researcher")) == []
 
 
 # ── plaintext tempfile lifecycle ─────────────────────────────────────────────
@@ -388,6 +436,28 @@ def test_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path, stdin_file)
     assert returncode == 0
     assert observed.read_text(encoding="utf-8") == "secret $(not shell)"
     assert not dm_file.exists()
+
+
+def test_delivery_runner_marks_recipient_turn_as_background(tmp_path):
+    dm_file = tmp_path / "message.txt"
+    dm_file.write_text("probe", encoding="utf-8")
+    observed = tmp_path / "observed-env.txt"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text("
+        "os.environ.get('HERMES_BACKGROUND_DELIVERY', ''), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    returncode = bot_mode_dm._run_delivery(
+        [sys.executable, str(child), str(observed)],
+        str(dm_file),
+        stdin_file=False,
+    )
+
+    assert returncode == 0
+    assert observed.read_text(encoding="utf-8") == "1"
 
 
 def test_delivery_runner_unlinks_when_child_launch_raises(tmp_path, monkeypatch):
@@ -681,7 +751,7 @@ def test_sweeper_removes_only_stale_dm_files(tmp_path, monkeypatch):
     old = now - bot_mode_dm._DM_STALE_SECONDS - 1
     os.utime(legacy_stale, (old, old))
     os.utime(stale, (old, old))
-    bot_mode_dm._sweep_stale_dm_files(now=now)
+    bot_mode_dm.cleanup_bot_dm_cache(now=now)
 
     assert not legacy_stale.exists()
     assert not stale.exists()

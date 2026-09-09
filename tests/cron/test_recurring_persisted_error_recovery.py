@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 @pytest.fixture
-def cron_env(tmp_path, monkeypatch):
+def cron_env(tmp_path, monkeypatch, migrate_configured_cron_job):
     """Isolated cron env + a recurring no_agent interval job."""
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -63,6 +63,7 @@ def cron_env(tmp_path, monkeypatch):
     )
     script = hermes_home / "scripts" / "probe.py"
     script.write_text("print('ok')\n")
+    migrate_configured_cron_job(hermes_home, job)
     return {"home": hermes_home, "job_id": job["id"]}
 
 

@@ -5,7 +5,7 @@ import type { FC } from 'react'
 import { cn } from '@/lib/utils'
 import { $displayTimestamps } from '@/store/display-timestamps'
 
-import { formatTimelineRange } from './timestamp'
+import { formatClockTimestamp, formatTimelineRange } from './timestamp'
 
 const preciseDateTime = new Intl.DateTimeFormat(undefined, {
   day: 'numeric',
@@ -33,8 +33,14 @@ const unixDate = (value: unknown): Date | null => {
 export const TimelineTimestamp: FC<{
   className?: string
   completedAt?: number
+  /**
+   * `exact` keeps the millisecond range used by tool/activity boundaries.
+   * `clock` collapses the row to a single minute-precision wall clock — the
+   * moment a chat bubble was sent or landed (#41531 follow-up).
+   */
+  precision?: 'clock' | 'exact'
   timestamp?: number
-}> = ({ className, completedAt, timestamp }) => {
+}> = ({ className, completedAt, precision = 'exact', timestamp }) => {
   // One config key everywhere (#41531): `display.timestamps` in config.yaml
   // gates transcript timestamps here exactly as it gates the classic CLI's
   // [HH:MM] labels. Display-only, so toggling never touches model context.
@@ -48,16 +54,44 @@ export const TimelineTimestamp: FC<{
   const completed = validUnixSeconds(completedAt) && completedAt > timestamp ? unixDate(completedAt) : null
 
   const validCompletedAt = completed && validUnixSeconds(completedAt) ? completedAt : undefined
-  const startLabel = formatTimelineRange(timestamp, undefined)
-  const completedLabel = validCompletedAt === undefined ? '' : formatTimelineRange(validCompletedAt, undefined)
 
   const title = completed
     ? `${preciseDateTime.format(started)} → ${preciseDateTime.format(completed)}`
     : preciseDateTime.format(started)
 
+  if (precision === 'clock') {
+    // A chat bubble answers "when did this arrive", so it shows the settled
+    // moment as a single `4:30 PM`. Full precision stays on hover.
+    //
+    // Two deliberate fallbacks to the start time: a turn that never completed
+    // (still streaming, errored, or cancelled) has no completion to show, and
+    // an instant turn whose completion equals its start has nothing to add.
+    // While streaming, the row therefore shows the send minute and settles to
+    // the landing minute — invisible for sub-minute turns, a single quiet
+    // change for long ones.
+    const landedSeconds = validCompletedAt ?? timestamp
+
+    return (
+      <span
+        className={cn('text-[0.625rem] leading-4 tabular-nums text-muted-foreground/55', className)}
+        data-slot="timeline-timestamp"
+        title={title}
+      >
+        <time dateTime={(completed ?? started).toISOString()}>{formatClockTimestamp(landedSeconds)}</time>
+      </span>
+    )
+  }
+
+  const startLabel = formatTimelineRange(timestamp, undefined)
+  const completedLabel = validCompletedAt === undefined ? '' : formatTimelineRange(validCompletedAt, undefined)
+
   return (
     <span
-      className={cn('text-[0.625rem] leading-4 tabular-nums text-muted-foreground/55', className)}
+      // The same meta ink as the tool rows' stamps (SCAFFOLD_META_CLASS).
+      // `text-muted-foreground/55` doubled an alpha: muted-foreground is
+      // already a 54% mix of the base ink, so the stamp landed near 30% —
+      // faint over a dark chrome and fainter over a light one.
+      className={cn('text-[0.625rem] leading-4 tabular-nums text-(--conversation-scaffold-meta)', className)}
       data-slot="timeline-timestamp"
       title={title}
     >
@@ -110,5 +144,5 @@ export const MessageTimelineTimestamp: FC<{
     return null
   }
 
-  return <TimelineTimestamp className={className} completedAt={completedAt} timestamp={timestamp} />
+  return <TimelineTimestamp className={className} completedAt={completedAt} precision="clock" timestamp={timestamp} />
 }

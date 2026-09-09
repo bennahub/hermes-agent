@@ -212,6 +212,19 @@ class AgentComputerStore:
             ).fetchone()
             return _row_computer(row) if row else None
 
+    def delete_computer(self, computer_id: str) -> None:
+        """Drop one computer row plus its control state, keeping the audit trail.
+
+        ``audit`` rows carry ``computer_id`` but no foreign key, so the evidence of what the
+        computer did outlives the row — deliberate: a retired agent's history stays readable.
+        """
+        with self._lock:
+            self._conn.execute("DELETE FROM leases WHERE computer_id = ?", (computer_id,))
+            self._conn.execute("DELETE FROM takeover_tokens WHERE computer_id = ?", (computer_id,))
+            self._conn.execute("DELETE FROM checkpoints WHERE computer_id = ?", (computer_id,))
+            self._conn.execute("DELETE FROM computers WHERE id = ?", (computer_id,))
+            self._conn.commit()
+
     def list_computers(self) -> list[AgentComputer]:
         with self._lock:
             rows = self._conn.execute(

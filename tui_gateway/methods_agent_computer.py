@@ -260,4 +260,5 @@ def _(rid, params: dict, _contract=get_contract, _who=_principal_from, _fail=_rp
 
 
 def register(server) -> None:
+    server.AgentComputerError = AgentComputerError
     _registry.install(server)

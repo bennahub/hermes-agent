@@ -1,7 +1,7 @@
 """Persistent Agent Computers + Human Takeover (BWM-796).
 
-Reuses the existing Hermes Chromium/CDP launch shape. Does not build a
-second browser runtime. AgentComputer and BrowserIdentity stay separate.
+Selects memory, private Chromium/CDP, or headed native desktop runtimes.
+AgentComputer authority and BrowserIdentity persistence stay separate.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def resolve_runtime_name(
     env: str | None = None,
     config: dict | None = None,
 ) -> str:
-    """Choose memory vs chromium.
+    """Choose memory, chromium or native_desktop.
 
     Order: explicit env override (tests/operators) → config.yaml
     ``agent_computer.runtime`` → memory. Not a user-facing HERMES_* setting.
@@ -61,17 +61,33 @@ def build_service(
     *,
     data_root: str | Path | None = None,
     runtime=None,
+    config: dict | None = None,
 ) -> AgentComputerService:
     from .adapter import private_dir
 
     root = private_dir(Path(data_root or default_data_root()))
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+        except Exception:
+            config = {}
+    section = (config or {}).get("agent_computer") or {}
     if runtime is None:
-        if resolve_runtime_name() == "chromium":
+        name = resolve_runtime_name(config=config)
+        if name == "chromium":
             runtime = HermesChromiumRuntime()
+        elif name == "native_desktop":
+            from .native_desktop import NativeDesktopRuntime
+            runtime = NativeDesktopRuntime(**(section.get("native_desktop") or {}))
         else:
             runtime = InMemoryRuntime()
     store = AgentComputerStore(root / "state.db")
-    return AgentComputerService(store, runtime, data_root=root)
+    try:
+        max_active = int(section.get("max_active_computers", 2))
+    except (TypeError, ValueError):
+        max_active = 2
+    return AgentComputerService(store, runtime, data_root=root, max_active_computers=max_active)
 
 
 def get_service() -> AgentComputerService:

@@ -131,29 +131,17 @@ class TestTemplateVisibleRoleHelper:
 
 
 class TestSummaryRoleAlternatesAgainstVisibleNeighbours:
-    def test_captured_devstral_shape_emits_assistant_summary(self, compressor):
-        """The byte-captured poisoning shape: protected head ends
-        ``[user, assistant(tool_calls), tool]``, tail is all tool flow.
-        The literal previous role is ``tool`` (which used to pin the
-        summary to "user"); the template-visible previous role is
-        ``user``, so the summary must be emitted as ``assistant``."""
-        c = compressor
+    def test_incomplete_head_uses_user_summary_without_orphan_instruction(self, compressor):
         messages = [{"role": "user", "content": "run a full systems diagnostic"}]
         messages += _tool_turns(0, 30)
-
         mocked = f"{SUMMARY_PREFIX}\nrolled-up summary of the tool work"
-        with patch.object(c, "_generate_summary", return_value=mocked):
-            out = c.compress(messages, current_tokens=90_000)
-
+        with patch.object(compressor, "_generate_summary", return_value=mocked):
+            out = compressor.compress(messages, current_tokens=90_000)
         rows = _summary_rows(out)
         assert len(rows) == 1
-        assert rows[0].get("role") == "assistant", (
-            "REGRESSION: compaction summary emitted as role=user directly "
-            "after a template-visible user turn (only exempt tool-flow "
-            "messages between). Mistral-strict templates reject the whole "
-            "request with a Jinja alternation 500 and the stored session is "
-            f"poisoned permanently. Got role={rows[0].get('role')!r}."
-        )
+        assert rows[0]["role"] == "user"
+        assert out.index(rows[0]) == 0
+        assert _mistral_alternation_ok(out)
 
     def test_captured_shape_passes_mistral_alternation(self, compressor):
         c = compressor
@@ -198,9 +186,9 @@ class TestSummaryRoleAlternatesAgainstVisibleNeighbours:
 
         rows = _summary_rows(out)
         assert len(rows) == 1
-        # Merged into a template-exempt tail message: invisible to the
-        # alternation check, summary content still delivered.
-        assert _template_visible_role(rows[0]) is None
+        # Incomplete protected head shrinks; the summary shares the current user carrier.
+        assert _template_visible_role(rows[0]) == "user"
+        assert "latest question" in rows[0]["content"]
         assert _mistral_alternation_ok(out)
 
 

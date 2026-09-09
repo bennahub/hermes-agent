@@ -60,6 +60,77 @@ def map_screenshot_to_viewport(
     )
 
 
+def map_client_to_viewport(
+    x: float,
+    y: float,
+    *,
+    client_width: int,
+    client_height: int,
+    viewport_width: int,
+    viewport_height: int,
+) -> tuple[float, float]:
+    """Map CSS pixels on the Owner surface to Chromium viewport pixels.
+
+    Uses the displayed content box, not CSS upscaling of a smaller source.
+    Identity when sizes match or either side is missing.
+    """
+    if (
+        client_width <= 0
+        or client_height <= 0
+        or viewport_width <= 0
+        or viewport_height <= 0
+        or (client_width == viewport_width and client_height == viewport_height)
+    ):
+        return float(x), float(y)
+    return (
+        float(x) * viewport_width / client_width,
+        float(y) * viewport_height / client_height,
+    )
+
+
+def map_owner_pointer(
+    x: float,
+    y: float,
+    *,
+    displayed_width: float,
+    displayed_height: float,
+    viewport_width: int,
+    viewport_height: int,
+    frame_width: int = 0,
+    frame_height: int = 0,
+) -> tuple[float, float]:
+    """Map a click on the displayed remote frame to Chromium CSS pixels.
+
+    ``x`` / ``y`` are CSS pixels inside the painted canvas box (origin at the
+    canvas top-left). Letterbox around the canvas is not part of this box.
+    When the JPEG bitmap size is known and differs from the viewport, the
+    path is display → bitmap → viewport. Otherwise display → viewport.
+    """
+    dw = float(displayed_width or 0)
+    dh = float(displayed_height or 0)
+    if dw <= 0 or dh <= 0 or viewport_width <= 0 or viewport_height <= 0:
+        return float(x), float(y)
+    fx = int(frame_width or 0)
+    fy = int(frame_height or 0)
+    if fx > 0 and fy > 0:
+        return map_screenshot_to_viewport(
+            float(x) * fx / dw,
+            float(y) * fy / dh,
+            screenshot_width=fx,
+            screenshot_height=fy,
+            viewport_width=viewport_width,
+            viewport_height=viewport_height,
+        )
+    return map_client_to_viewport(
+        float(x),
+        float(y),
+        client_width=max(1, int(round(dw))),
+        client_height=max(1, int(round(dh))),
+        viewport_width=viewport_width,
+        viewport_height=viewport_height,
+    )
+
+
 def mapping_kind(
     screenshot_width: int,
     screenshot_height: int,

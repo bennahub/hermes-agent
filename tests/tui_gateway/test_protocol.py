@@ -178,6 +178,7 @@ def test_write_json(capture):
 def test_live_session_payload_replays_pending_approval(server, monkeypatch):
     """A reattached client receives the approval that was emitted while detached."""
     from tools import approval
+    from tools import approval_gateway_wait
 
     session = {
         "agent": types.SimpleNamespace(),
@@ -196,8 +197,8 @@ def test_live_session_payload_replays_pending_approval(server, monkeypatch):
     second = {"command": "rm -rf /tmp/later", "description": "later"}
     saved_queue = approval._gateway_queues.pop("stored-session", None)
     approval._gateway_queues["stored-session"] = [
-        approval._ApprovalEntry(first),
-        approval._ApprovalEntry(second),
+        approval_gateway_wait._ApprovalEntry(first),
+        approval_gateway_wait._ApprovalEntry(second),
     ]
     monkeypatch.setattr(server, "_approval_request_payload", lambda data: dict(data or {}))
 
@@ -494,6 +495,52 @@ def test_clarify_batch_cancel_all_returns_empty(server):
 
     thread.join(timeout=5)
     assert box["answer"] == ""
+
+
+def test_single_question_batch_accepts_legacy_answer_without_question_id(server):
+    """The real clarify batch bridge preserves a legacy one-question answer."""
+    from tools.clarify_tool import _normalize_questions, _run_batch
+
+    box = {}
+    questions, error = _normalize_questions([{
+        "question": "Which MacBook?",
+        "choices": ["abdulrahmans-MacBook-Air-2.local"],
+    }])
+    assert error is None
+
+    def run():
+        def callback(_question, _choices, *, questions):
+            wire = [{k: entry[k] for k in ("qid", "question", "choices", "multi_select")}
+                    for entry in questions]
+            return server._block("clarify.request", "s1", {"questions": wire},
+                                 timeout=5, batch_qids=[entry["qid"] for entry in questions])
+        box["answer"] = _run_batch(questions, callback, "target")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with server._prompt_lock:
+            if server._batch_clarify:
+                rid = next(iter(server._batch_clarify))
+                break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("clarify batch request never registered")
+
+    response = server.handle_request({
+        "id": "legacy", "method": "clarify.respond",
+        "params": {"request_id": rid, "answer": "abdulrahmans-MacBook-Air-2.local"},
+    })
+    assert response["result"] == {"status": "ok", "remaining": []}
+    thread.join(timeout=5)
+    assert json.loads(box["answer"]) == {
+        "responses": [{
+            "question": "Which MacBook?",
+            "choices_offered": ["abdulrahmans-MacBook-Air-2.local"],
+            "user_response": "abdulrahmans-MacBook-Air-2.local",
+        }]
+    }
 
 
 def test_clarify_batch_late_question_respond_is_idempotent(server):
@@ -999,7 +1046,7 @@ def test_session_resume_active_turn_payload_matches_desktop_fixture(server, monk
         "session_key": fixture["session_key"],
     }
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
-    monkeypatch.setattr(server, "_session_info", lambda _agent: fixture["info"])
+    monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: fixture["info"])
 
     # JSON round-trip the real RPC envelope: the desktop fixture must stay
     # faithful to what the gateway actually serializes, not a copied shape.
@@ -1263,13 +1310,10 @@ def test_skills_manage_search_uses_tools_hub_sources(server):
     auth = MagicMock(return_value="auth")
     router = MagicMock(return_value=["source"])
     search = MagicMock(return_value=[result])
-    fake_hub = types.SimpleNamespace(
-        GitHubAuth=auth,
-        create_source_router=router,
-        unified_search=search,
-    )
+    fake_search = types.SimpleNamespace(create_source_router=router, unified_search=search)
+    fake_github = types.SimpleNamespace(GitHubAuth=auth)
 
-    with patch.dict(sys.modules, {"tools.skills_hub": fake_hub}):
+    with patch.dict(sys.modules, {"tools.skills_hub_search": fake_search, "tools.skills_hub_github": fake_github}):
         resp = server.handle_request({
             "id": "skills-search",
             "method": "skills.manage",

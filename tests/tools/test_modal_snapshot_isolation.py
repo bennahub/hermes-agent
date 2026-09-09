@@ -197,13 +197,14 @@ def _install_modal_test_modules(
     }
 
 
-def test_modal_environment_migrates_legacy_snapshot_key_and_uses_snapshot_id(tmp_path):
+def test_modal_environment_migrates_legacy_snapshot_key_and_uses_snapshot_id(tmp_path, monkeypatch):
     state = _install_modal_test_modules(tmp_path)
     snapshot_store = state["snapshot_store"]
     snapshot_store.parent.mkdir(parents=True, exist_ok=True)
     snapshot_store.write_text(json.dumps({"task-legacy": "im-legacy123"}))
 
     modal_module = _load_module("tools.environments.modal", TOOLS_DIR / "environments" / "modal.py")
+    monkeypatch.setattr(modal_module, "ensure_lazy_dep", lambda feature: None)
     env = modal_module.ModalEnvironment(image="python:3.11", task_id="task-legacy")
 
     try:
@@ -214,9 +215,10 @@ def test_modal_environment_migrates_legacy_snapshot_key_and_uses_snapshot_id(tmp
         env.cleanup()
 
 
-def test_resolve_modal_image_uses_snapshot_ids_and_registry_images(tmp_path):
+def test_resolve_modal_image_uses_snapshot_ids_and_registry_images(tmp_path, monkeypatch):
     state = _install_modal_test_modules(tmp_path)
     modal_module = _load_module("tools.environments.modal", TOOLS_DIR / "environments" / "modal.py")
+    monkeypatch.setattr(modal_module, "ensure_lazy_dep", lambda feature: None)
 
     snapshot_image = modal_module._resolve_modal_image("im-snapshot123")
     registry_image = modal_module._resolve_modal_image("python:3.11")

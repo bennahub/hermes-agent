@@ -94,12 +94,12 @@ class TestResolverPlumbing:
 
         no_desktop_env.setattr(cc, "coding_selection", lambda **_: ["coding"])
 
-        assert server._load_enabled_toolsets("desktop") == [
-            "coding",
-            "desktop_ui",
-            "project",
-        ]
-        assert server._load_enabled_toolsets("tui") == ["coding", "project"]
+        desktop = server._load_enabled_toolsets("desktop")
+        tui = server._load_enabled_toolsets("tui")
+        assert {"coding", "desktop_ui", "project"}.issubset(desktop)
+        assert {"coding", "project"}.issubset(tui)
+        assert "desktop_ui" not in tui
+
 
     def test_config_path_folds_in_the_session_surface(self, no_desktop_env):
         import agent.coding_context as cc

@@ -8,10 +8,8 @@ resolver + tool-schema builder yield exactly the file/terminal tools.
 
 import pytest
 
-from hermes_cli.setup import (
-    _blank_slate_minimal_toolsets,
-    _blank_slate_minimize_config,
-)
+from hermes_cli.setup_quick import _blank_slate_minimal_toolsets, _blank_slate_minimize_config
+from hermes_cli import setup_quick
 
 
 class TestBlankSlateMinimalToolsets:
@@ -54,11 +52,11 @@ class TestBlankSlateMinimalToolsets:
         _entry = _tool_registry.get_entry("vision_analyze")
         monkeypatch.setattr(_entry, "check_fn", lambda: True)
         # This test pins disabled_toolsets SUBTRACTION, not deferral policy —
-        # assemble with the legacy everything-eager override so the expected
+        # disable discovery and deferral so the expected
         # list stays deferral-independent (#97979 defers process_manage by
         # default, which would swap it for the three bridge tools here).
         from tools.tool_search import ToolSearchConfig
-        _legacy = ToolSearchConfig.from_raw({"enabled": "on", "defer": []})
+        _legacy = ToolSearchConfig.from_raw({"enabled": "off", "defer": []})
         monkeypatch.setattr("tools.tool_search.load_config", lambda: _legacy)
         monkeypatch.setattr("tools.tool_search.load_config_readonly", lambda: _legacy)
         from hermes_cli.tools_config import _get_platform_tools
@@ -75,7 +73,7 @@ class TestBlankSlateMinimalToolsets:
         names = sorted(
             {(d.get("function") or {}).get("name") or d.get("name") for d in defs}
         )
-        assert names == ["patch", "process_manage", "read_file", "search_files",
+        assert names == ["patch", "process_manage", "read_file", "search_files", "send_file",
                          "skill_manage", "skill_view", "skills_list",
                          "terminal", "vision_analyze", "write_file"]
 
@@ -113,14 +111,14 @@ class TestBlankSlateFork:
         # Fork prompt returns 0 = finish now.
         monkeypatch.setattr(s, "prompt_choice", lambda *a, **k: 0)
         walked = {"called": False}
-        monkeypatch.setattr(s, "_blank_slate_walkthrough",
+        monkeypatch.setattr(setup_quick, "_blank_slate_walkthrough",
                             lambda cfg, home: walked.__setitem__("called", True))
         opted_out = {"value": None}
-        monkeypatch.setattr("tools.skills_sync.set_bundled_skills_opt_out",
+        monkeypatch.setattr("tools.skills_sync_bundled_ops.set_bundled_skills_opt_out",
                             lambda enabled: opted_out.__setitem__("value", enabled))
 
         cfg = {}
-        s._run_blank_slate_setup(cfg, tmp_path, is_existing=False)
+        setup_quick._run_blank_slate_setup(cfg, tmp_path, is_existing=False)
 
         # Minimal baseline was applied, walkthrough was NOT run.
         assert cfg["platform_toolsets"]["cli"] == ["file", "skills", "terminal", "vision"]

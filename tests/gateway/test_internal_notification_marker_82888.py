@@ -3,9 +3,10 @@
 Async-delegation batch completions and background watch notifications re-enter
 the gateway as synthetic ``MessageEvent(internal=True)`` turns (see
 ``_inject_watch_notification``). They must keep ``role='user'`` (message
-alternation is sacred) but the persisted row must carry
-``display_kind='internal_notification'`` so transcripts and the desktop UI can
-render them as timeline notices instead of user bubbles.
+alternation is sacred). Delegation envelopes are persisted with
+``display_kind='hidden'`` so only the agent's consolidated reply reaches the
+owner; other internal events retain ``display_kind='internal_notification'``
+for timeline rendering.
 
 Covered:
 
@@ -116,7 +117,20 @@ def _user_entries(calls):
 
 
 @pytest.mark.asyncio
-async def test_internal_event_threads_marker_into_agent_run(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "notification_text",
+    [
+        "[ASYNC DELEGATION BATCH COMPLETE]",
+        (
+            "[IMPORTANT: 2 background subagent delegations completed for this "
+            "session. Treat these results as one completion batch.]\n"
+            "[ASYNC DELEGATION COMPLETE — deleg_1]\nPASS"
+        ),
+    ],
+)
+async def test_internal_event_threads_marker_into_agent_run(
+    monkeypatch, tmp_path, notification_text
+):
     runner = _bootstrap(monkeypatch, tmp_path)
     runner._run_agent = AsyncMock(
         return_value={
@@ -129,12 +143,12 @@ async def test_internal_event_threads_marker_into_agent_run(monkeypatch, tmp_pat
     )
 
     await runner._handle_message_with_agent(
-        _event(internal=True, text="[ASYNC DELEGATION BATCH COMPLETE]"),
+        _event(internal=True, text=notification_text),
         _source(), SESSION_KEY, 1,
     )
 
     kwargs = runner._run_agent.call_args.kwargs
-    assert kwargs["persist_user_display_kind"] == "internal_notification"
+    assert kwargs["persist_user_display_kind"] == "hidden"
 
 
 @pytest.mark.asyncio
@@ -186,7 +200,7 @@ async def test_failed_early_fallback_row_is_marked_for_internal_event(
     assert entries, "expected a fallback user-row write"
     for entry in entries:
         assert entry["role"] == "user"  # alternation invariant: role unchanged
-        assert entry["display_kind"] == "internal_notification"
+        assert entry["display_kind"] == "hidden"
 
 
 @pytest.mark.asyncio
@@ -258,14 +272,14 @@ def test_marked_row_replays_cleanly_and_never_reaches_provider(tmp_path):
             session_id=sid,
             role="user",
             content="[ASYNC DELEGATION BATCH COMPLETE — 2/2 succeeded]",
-            display_kind="internal_notification",
+            display_kind="hidden",
         )
         db.append_message(session_id=sid, role="assistant", content="noted")
 
         # Session resume/load tolerates the extra key and keeps role='user'.
         replayed = db.get_messages_as_conversation(sid)
         user_row, = [m for m in replayed if m["role"] == "user"]
-        assert user_row["display_kind"] == "internal_notification"
+        assert user_row["display_kind"] == "hidden"
         assert user_row["content"].startswith("[ASYNC DELEGATION BATCH COMPLETE")
 
         # Provider hygiene: the per-request copy in conversation_loop pops
@@ -283,6 +297,6 @@ def test_marked_row_replays_cleanly_and_never_reaches_provider(tmp_path):
         assert "display_kind" not in api_msg
         assert "display_metadata" not in api_msg
         assert api_msg["role"] == "user"
-        assert user_row["display_kind"] == "internal_notification"
+        assert user_row["display_kind"] == "hidden"
     finally:
         db.close()

@@ -227,10 +227,14 @@ class TestCliApprovalUi:
 
         class FakeAgent:
             def __init__(self, **kwargs):
+                self.session_id = kwargs["session_id"]
                 self._print_fn = None
                 self.thinking_callback = None
 
             def run_conversation(self, **kwargs):
+                from tools.owner_task_authority import consume_execution_source
+
+                seen["execution_source"] = consume_execution_source(self)
                 from tools.terminal_tool import (
                     _get_approval_callback,
                     _get_sudo_password_callback,
@@ -245,7 +249,7 @@ class TestCliApprovalUi:
                     "failed": False,
                 }
 
-        with patch.object(cli_module, "AIAgent", FakeAgent), \
+        with patch("run_agent.AIAgent", FakeAgent), \
              patch.object(cli_module, "_cprint"), \
              patch.object(cli_module, "ChatConsole") as chat_console:
             chat_console.return_value.print = MagicMock()
@@ -257,6 +261,8 @@ class TestCliApprovalUi:
             for _thread in list(cli._background_tasks.values()):
                 _thread.join(timeout=10)
 
+        assert seen["execution_source"]["instruction"] == "check weather"
+        assert seen["execution_source"]["source"] == "cli.background"
         assert seen["approval"].__self__ is cli
         assert seen["approval"].__func__ is HermesCLI._approval_callback
         assert seen["sudo"].__self__ is cli
