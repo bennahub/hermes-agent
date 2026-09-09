@@ -21,6 +21,15 @@ async def google_workspace_action(data, request):
     action = actions.get(data["action"])
     if action is None or (action == "save_client" and data.get("field_id") != "google_client_secret_json"):
         raise ValueError("unsupported_action")
+    from hermes_cli.asera_google_hosted import begin as hosted_begin, hosted_ready
+    if action == "start" and hosted_ready() and data.get("loopback_port") is None:
+        raw = await asyncio.to_thread(
+            hosted_begin, plugin="gmail", account=data.get("name"), owner_id=owner)
+        projected = auth_projection({**raw, "status": "pending"}, identifier="google-workspace",
+                                    scope=data["scope"])
+        projected["auth"]["flow"] = "browser"
+        projected["auth"]["requested_scopes"] = list(raw.get("requested_scopes") or [])
+        return projected
     raw = await asyncio.to_thread(run_operation, data["scope"], owner, action,
                                   value=data.get("value"), session_id=data.get("session_id"),
                                   loopback_port=data.get("loopback_port"),

@@ -379,7 +379,7 @@ def test_start_server_loopback_public_url_enables_gate(monkeypatch):
         )
         assert web_server.app.state.auth_required is True
         assert web_server.app.state.trusted_public_hosts == frozenset(
-            {"dashboard.example.test"}
+            {"dashboard.example.test", "auth.asera.dev"}
         )
         assert captured["kwargs"].get("host") == "127.0.0.1"
         assert captured["kwargs"].get("proxy_headers") is True

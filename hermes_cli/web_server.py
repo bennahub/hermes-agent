@@ -958,8 +958,10 @@ app.include_router(_cron_routes.router)
 app.include_router(_mcp_routes.router)
 from hermes_cli.web_routers import connections as _connections_routes
 from hermes_cli.web_routers import agent_computer as _agent_computer_routes
+from hermes_cli.web_routers import asera_oauth as _asera_oauth_routes
 app.include_router(_connections_routes.router)
 app.include_router(_agent_computer_routes.router)
+app.include_router(_asera_oauth_routes.router)
 app.include_router(_ops_routes.router)
 app.include_router(_skills_routes.hub_router)
 app.include_router(_profiles_routes.router)
@@ -1079,7 +1081,9 @@ def _configure_auth_gate(
     # reverse-proxy deployments; resolved once so middleware never reloads
     # config. A non-loopback public hostname engages the gate even on a loopback
     # backend, else the SPA's local session token becomes remotely reachable.
-    app.state.trusted_public_hosts = _dashboard_public_hosts()
+    from hermes_cli.asera_google_hosted import trusted_hosts as _asera_oauth_hosts
+    public_hosts = _dashboard_public_hosts()
+    app.state.trusted_public_hosts = frozenset(public_hosts | _asera_oauth_hosts())
     # auth_required drives middleware, SPA-token injection, WS auth, the
     # startup refusal, the gate-on banner and uvicorn proxy_headers.
     if _desktop_loopback_auth_exempt(host, ssh_session_token, ssh_owner_nonce):
@@ -1093,7 +1097,7 @@ def _configure_auth_gate(
             "keeps its own gate.",
         )
     else:
-        app.state.auth_required = should_require_dashboard_auth(host, app.state.trusted_public_hosts)
+            app.state.auth_required = should_require_dashboard_auth(host, public_hosts)
 
     # ``--insecure`` no longer disables the gate (June 2026 hermes-0day
     # hardening); warn that it is a no-op rather than silently ignore it.

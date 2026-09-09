@@ -155,6 +155,27 @@ async def plugins_action(request: Request):
         index = await asyncio.to_thread(build_plugin_index, _build_oauth_catalog())
         mapped = resolve_plugin_action(plugin_id, action, index["plugins"], account=account)
         mapped.update(extra)
+        from hermes_cli.asera_google_hosted import allocate_account, begin as hosted_begin, hosted_ready
+        if (hosted_ready() and mapped.get("id") == "google-workspace"
+                and mapped.get("action") == "connect" and extra.get("loopback_port") is None):
+            target = mapped.get("name")
+            if action == "add_account" and not target:
+                target = allocate_account()
+            session = getattr(request.state, "session", None)
+            if session is not None and session.user_id:
+                owner = json.dumps([session.provider, session.user_id], separators=(",", ":"))
+            elif not getattr(request.app.state, "auth_required", True):
+                owner = "local-dashboard"
+            else:
+                raise HTTPException(401, "authentication_required")
+            started = await asyncio.to_thread(
+                hosted_begin, plugin=plugin_id, account=target, owner_id=owner)
+            projected = auth_projection({**started, "status": "pending"},
+                                        identifier="google-workspace", scope=mapped.get("scope") or "default")
+            projected["auth"]["flow"] = "browser"
+            projected["auth"]["requested_scopes"] = list(started.get("requested_scopes") or [])
+            projected["auth"].pop("user_code", None)
+            return projected
         return await dispatch(parse_action(mapped), request)
     except HTTPException:
         raise
