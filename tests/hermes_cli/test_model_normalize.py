@@ -104,9 +104,12 @@ class TestDeepseekVSeriesPassThrough:
     """
 
 
+    def test_deepseek_provider_preserves_current_flash(self):
+        result = normalize_model_for_provider("deepseek-flash", "deepseek")
+        assert result == "deepseek-flash"
+
     def test_deepseek_provider_preserves_v4_pro(self):
-        """End-to-end via normalize_model_for_provider — user selecting
-        V4 Pro must reach DeepSeek's API as V4 Pro, not V3 alias."""
+        """Legacy V4 ids remain pass-through while DeepSeek keeps compatibility routing."""
         result = normalize_model_for_provider("deepseek-v4-pro", "deepseek")
         assert result == "deepseek-v4-pro"
 
@@ -114,7 +117,7 @@ class TestDeepseekVSeriesPassThrough:
 # ── DeepSeek post-2026-07-24 alias remapping ───────────────────────────
 
 class TestDeepseekCanonicalAndReasonerMapping:
-    """Retired aliases and fuzzy names rewrite to deepseek-v4-flash.
+    """Retired aliases and fuzzy names rewrite to the current deepseek-flash.
 
     DeepSeek cut off ``deepseek-chat`` / ``deepseek-reasoner`` on
     2026-07-24; sending them on the wire returns HTTP 400.
@@ -124,7 +127,7 @@ class TestDeepseekCanonicalAndReasonerMapping:
     def test_provider_path_rewrites_reasoner(self):
         assert (
             normalize_model_for_provider("deepseek-reasoner", "deepseek")
-            == "deepseek-v4-flash"
+            == "deepseek-flash"
         )
 
     @pytest.mark.parametrize("model", [
@@ -135,7 +138,7 @@ class TestDeepseekCanonicalAndReasonerMapping:
         "deepseek-cot-experimental",
     ])
     def test_reasoner_keywords_map_to_v4_flash(self, model):
-        assert _normalize_for_deepseek(model) == "deepseek-v4-flash"
+        assert _normalize_for_deepseek(model) == "deepseek-flash"
 
 
 # ── Regression: issue #78796 ───────────────────────────────────────────

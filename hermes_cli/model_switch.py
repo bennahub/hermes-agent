@@ -153,7 +153,7 @@ MODEL_ALIASES: dict[str, ModelIdentity] = {
     "o3":        ModelIdentity("openai", "o3"),
     "o4":        ModelIdentity("openai", "o4"),
     "gemini":    ModelIdentity("google", "gemini"),
-    "deepseek":  ModelIdentity("deepseek", "deepseek-chat"),
+    "deepseek":  ModelIdentity("deepseek", "deepseek-flash"),
     "grok":      ModelIdentity("x-ai", "grok"),
     "llama":     ModelIdentity("meta-llama", "llama"),
     "qwen":      ModelIdentity("qwen", "qwen"),
