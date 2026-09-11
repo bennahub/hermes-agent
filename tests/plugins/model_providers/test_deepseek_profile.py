@@ -61,6 +61,14 @@ class TestDeepSeekThinkingWireShape:
         )
         assert top_level == {"reasoning_effort": "max"}
 
+    def test_current_flash_max_emits_thinking_and_max(self, deepseek_profile):
+        extra_body, top_level = deepseek_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "max"},
+            model="deepseek-flash",
+        )
+        assert extra_body == {"thinking": {"type": "enabled"}}
+        assert top_level == {"reasoning_effort": "max"}
+
     def test_explicitly_disabled_sends_disabled_marker(self, deepseek_profile):
         """``reasoning_config.enabled=False`` → ``thinking.type=disabled``.
 
@@ -104,6 +112,7 @@ class TestDeepSeekModelGating:
     @pytest.mark.parametrize(
         "model",
         [
+            "deepseek-flash",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "deepseek-v4-future-variant",
@@ -186,16 +195,16 @@ class TestDeepSeekAuxModel:
     system.
     """
 
-    def test_profile_advertises_deepseek_v4_flash(self, deepseek_profile):
-        assert deepseek_profile.default_aux_model == "deepseek-v4-flash"
+    def test_profile_advertises_current_flash(self, deepseek_profile):
+        assert deepseek_profile.default_aux_model == "deepseek-flash"
 
-    def test_fallback_models_are_v4_only(self, deepseek_profile):
+    def test_fallback_models_prefer_current_flash(self, deepseek_profile):
         assert deepseek_profile.fallback_models == (
+            "deepseek-flash",
             "deepseek-v4-pro",
-            "deepseek-v4-flash",
         )
 
-    def test_consumer_api_returns_deepseek_v4_flash(self):
+    def test_consumer_api_returns_current_flash(self):
         from agent.auxiliary_client import _get_aux_model_for_provider
-        assert _get_aux_model_for_provider("deepseek") == "deepseek-v4-flash"
+        assert _get_aux_model_for_provider("deepseek") == "deepseek-flash"
 

@@ -1,6 +1,6 @@
 """DeepSeek provider profile.
 
-V4 defaults to thinking ON when ``extra_body.thinking`` is unset, and then
+Current DeepSeek thinking models default to thinking ON when ``extra_body.thinking`` is unset, and then
 requires ``reasoning_content`` to be echoed back on later turns (HTTP 400 after
 the first tool call otherwise). This profile sets ``thinking`` explicitly and
 maps effort onto DeepSeek's ``reasoning_effort``; V3 models are left untouched.
@@ -22,7 +22,9 @@ class DeepSeekProfile(ProviderProfile):
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         m = (model or "").strip().lower()
-        if not m.startswith("deepseek-v") or m.startswith("deepseek-v3"):  # v4+ only; v3 excluded
+        is_current_flash = m == "deepseek-flash"
+        is_v4_plus = m.startswith("deepseek-v") and not m.startswith("deepseek-v3")
+        if not (is_current_flash or is_v4_plus):
             return {}, {}
         rc = reasoning_config if isinstance(reasoning_config, dict) else None
         # Always set thinking explicitly (default enabled, matching the API default)
@@ -42,8 +44,8 @@ class DeepSeekProfile(ProviderProfile):
 deepseek = DeepSeekProfile(
     name="deepseek", aliases=("deepseek-chat",), env_vars=("DEEPSEEK_API_KEY",), display_name="DeepSeek",
     description="DeepSeek — native DeepSeek API", signup_url="https://platform.deepseek.com/",
-    fallback_models=("deepseek-v4-pro", "deepseek-v4-flash"), base_url="https://api.deepseek.com/v1",
-    default_aux_model="deepseek-v4-flash",
+    fallback_models=("deepseek-flash", "deepseek-v4-pro"), base_url="https://api.deepseek.com/v1",
+    default_aux_model="deepseek-flash",
 )
 
 register_provider(deepseek)
