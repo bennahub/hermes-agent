@@ -53,6 +53,7 @@ import pytest
     ("deepseek/deepseek-r1", 600.0),
     ("deepseek/deepseek-r1-distill-llama-70b", 600.0),
     ("deepseek/deepseek-reasoner", 600.0),
+    ("deepseek/deepseek-flash", 600.0),
     ("deepseek/deepseek-v4-flash", 600.0),
     ("deepseek/deepseek-v4-pro", 600.0),
     ("deepseek-v4-flash-free", 600.0),   # catalog -free variant inherits via separator anchor
