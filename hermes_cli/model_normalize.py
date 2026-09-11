@@ -86,14 +86,15 @@ _CATALOGUE_PREFIX_REPAIR_PROVIDERS: frozenset[str] = frozenset({
 _LOWERCASE_MODEL_PROVIDERS: frozenset[str] = frozenset({
     "xiaomi"})
 
-# DeepSeek's direct API only accepts first-class V-series IDs after the 2026-07-24 cut-off (HTTP 400
-# otherwise). Both retired aliases map to deepseek-v4-flash per the official docs (thinking mode is
-# controlled by extra_body.thinking on the profile), so saved configs can't keep sending them.
+# DeepSeek V4.1 Flash launched on 2026-09-10 with ``deepseek-flash`` as the
+# canonical API id. ``deepseek-v4-flash`` remains a temporary compatibility
+# route, while the older chat/reasoner aliases are retired. Preserve explicit
+# V-series ids but normalize fuzzy/retired names to the durable canonical id.
 _DEEPSEEK_RETIRED_ALIASES: frozenset[str] = frozenset({
     "deepseek-chat", "deepseek-reasoner"})
 
 _DEEPSEEK_CANONICAL_MODELS: frozenset[str] = frozenset({
-    "deepseek-v4-pro", "deepseek-v4-flash"})
+    "deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"})
 
 # First-class V-series IDs incl. future ``deepseek-v5-*`` and dated variants
 # (``deepseek-v4-flash-20260423``): verified real model ids, NOT aliases of ``deepseek-chat``.
@@ -101,13 +102,15 @@ _DEEPSEEK_V_SERIES_RE = re.compile(r"^deepseek-v\d+([-.].+)?$")
 
 
 def _normalize_for_deepseek(model_name: str) -> str:
-    """Map a model input to a DeepSeek-accepted id: canonicals and ``deepseek-v<digit>…`` pass
-    through (future V-series work without a release); retired aliases and everything else become
-    ``deepseek-v4-flash``."""
+    """Map a model input to a DeepSeek-accepted id.
+
+    Canonicals and explicit ``deepseek-v<digit>…`` ids pass through. Retired
+    aliases and fuzzy names resolve to V4.1 Flash's canonical ``deepseek-flash``.
+    """
     bare = _strip_vendor_prefix(model_name).lower()
     if bare in _DEEPSEEK_CANONICAL_MODELS or _DEEPSEEK_V_SERIES_RE.match(bare):
         return bare
-    return "deepseek-v4-flash"
+    return "deepseek-flash"
 
 
 def _strip_vendor_prefix(model_name: str) -> str:

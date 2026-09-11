@@ -1,13 +1,10 @@
 """Unit tests for the DeepSeek provider profile's thinking-mode wiring.
 
-DeepSeek V4 expects every request to carry an explicit ``extra_body.thinking``
-parameter.  Omitting it makes the server default to thinking-mode ON, which
-then enforces the ``reasoning_content``-must-be-echoed-back contract on
-subsequent turns and breaks the conversation with HTTP 400 (#15700, #17212,
-#17825).
-
-These tests pin the profile's wire-shape contract so DeepSeek requests stay
-correctly shaped without going live.
+Modern DeepSeek models expect every request to carry an explicit
+``extra_body.thinking`` parameter. Omitting it makes the server default to
+thinking-mode ON, which then enforces the ``reasoning_content`` echo contract
+on subsequent turns. These tests pin the provider wire shape without going
+live and cover V4.1 Flash's canonical ``deepseek-flash`` id.
 """
 
 from __future__ import annotations
@@ -17,14 +14,7 @@ import pytest
 
 @pytest.fixture
 def deepseek_profile():
-    """Resolve the registered DeepSeek profile.
-
-    Going through ``providers.get_provider_profile`` keeps the test honest —
-    if someone later replaces the registered class with a plain
-    ``ProviderProfile``, every assertion below collapses.
-    """
-    # ``model_tools`` triggers plugin discovery on import, which is what
-    # registers the DeepSeek profile in the global provider registry.
+    """Resolve the registered DeepSeek profile through normal plugin discovery."""
     import model_tools  # noqa: F401
     import providers
 
@@ -36,20 +26,18 @@ def deepseek_profile():
 class TestDeepSeekThinkingWireShape:
     """``build_api_kwargs_extras`` produces DeepSeek's exact wire format."""
 
-    def test_v4_pro_default_enables_thinking_without_effort(self, deepseek_profile):
-        """No reasoning_config → thinking enabled, server picks default effort."""
+    def test_v41_flash_default_enables_thinking_without_effort(self, deepseek_profile):
         extra_body, top_level = deepseek_profile.build_api_kwargs_extras(
-            reasoning_config=None, model="deepseek-v4-pro"
+            reasoning_config=None, model="deepseek-flash"
         )
         assert extra_body == {"thinking": {"type": "enabled"}}
         assert top_level == {}
-
 
     @pytest.mark.parametrize("effort", ["low", "medium", "high"])
     def test_standard_efforts_pass_through(self, deepseek_profile, effort):
         _, top_level = deepseek_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": effort},
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
         )
         assert top_level == {"reasoning_effort": effort}
 
@@ -57,57 +45,51 @@ class TestDeepSeekThinkingWireShape:
     def test_xhigh_and_max_normalize_to_max(self, deepseek_profile, effort):
         _, top_level = deepseek_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": effort},
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
         )
         assert top_level == {"reasoning_effort": "max"}
 
     def test_explicitly_disabled_sends_disabled_marker(self, deepseek_profile):
-        """``reasoning_config.enabled=False`` → ``thinking.type=disabled``.
-
-        The crucial bit is that the parameter is *sent* at all — DeepSeek
-        defaults to thinking-on when ``thinking`` is absent.
-        """
         extra_body, top_level = deepseek_profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": False}, model="deepseek-v4-pro"
+            reasoning_config={"enabled": False}, model="deepseek-flash"
         )
         assert extra_body == {"thinking": {"type": "disabled"}}
-        # No effort when disabled — DeepSeek rejects it.
         assert top_level == {}
 
     def test_disabled_ignores_effort_field(self, deepseek_profile):
-        """Effort silently dropped when thinking is off."""
         _, top_level = deepseek_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": False, "effort": "high"},
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
         )
         assert top_level == {}
 
     def test_unknown_effort_omits_top_level(self, deepseek_profile):
-        """Garbage effort → omit reasoning_effort so DeepSeek applies its default."""
         _, top_level = deepseek_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "garbage"},
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
         )
         assert top_level == {}
 
     def test_empty_effort_omits_top_level(self, deepseek_profile):
         _, top_level = deepseek_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": ""},
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
         )
         assert top_level == {}
 
 
 class TestDeepSeekModelGating:
-    """V4 family gets thinking; V3 / unknown stay untouched."""
+    """V4.1/V4+ families get thinking; V3 and unknown models stay untouched."""
 
     @pytest.mark.parametrize(
         "model",
         [
+            "deepseek-flash",
+            "DEEPSEEK-FLASH",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "deepseek-v4-future-variant",
-            "DEEPSEEK-V4-PRO",  # case-insensitive
+            "DEEPSEEK-V4-PRO",
         ],
     )
     def test_thinking_capable_models_emit_thinking(self, deepseek_profile, model):
@@ -119,11 +101,11 @@ class TestDeepSeekModelGating:
     @pytest.mark.parametrize(
         "model",
         [
-            "deepseek-v3-0324",      # explicit V3
-            "deepseek-v3.1",         # V3 minor revisions
-            "",                       # bare/unknown
-            None,                     # missing
-            "deepseek-unknown",      # unrecognized
+            "deepseek-v3-0324",
+            "deepseek-v3.1",
+            "",
+            None,
+            "deepseek-unknown",
         ],
     )
     def test_non_thinking_models_emit_nothing(self, deepseek_profile, model):
@@ -135,28 +117,22 @@ class TestDeepSeekModelGating:
 
 
 class TestDeepSeekFullKwargsIntegration:
-    """End-to-end: the transport's full kwargs match DeepSeek's live wire format.
+    """End-to-end transport kwargs for canonical V4.1 Flash."""
 
-    The live test harness in ``tests/run_agent/test_deepseek_v4_thinking_live.py``
-    sends ``{"reasoning_effort": "high", "extra_body": {"thinking": {"type":
-    "enabled"}}}``.  Confirm the transport produces that exact shape when wired
-    through the registered DeepSeek profile.
-    """
-
-    def test_full_kwargs_match_live_wire_shape(self, deepseek_profile):
+    def test_full_kwargs_match_v41_flash_wire_shape(self, deepseek_profile):
         from agent.transports.chat_completions import ChatCompletionsTransport
 
         kwargs = ChatCompletionsTransport().build_kwargs(
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
             messages=[{"role": "user", "content": "ping"}],
             tools=None,
             provider_profile=deepseek_profile,
-            reasoning_config={"enabled": True, "effort": "high"},
+            reasoning_config={"enabled": True, "effort": "max"},
             base_url="https://api.deepseek.com/v1",
             provider_name="deepseek",
         )
-        assert kwargs["model"] == "deepseek-v4-pro"
-        assert kwargs["reasoning_effort"] == "high"
+        assert kwargs["model"] == "deepseek-flash"
+        assert kwargs["reasoning_effort"] == "max"
         assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
 
     def test_v3_full_kwargs_omit_thinking(self, deepseek_profile):
@@ -176,26 +152,14 @@ class TestDeepSeekFullKwargsIntegration:
 
 
 class TestDeepSeekAuxModel:
-    """DeepSeek aux model is set on the profile so users stop seeing the
-    bogus 'No auxiliary LLM provider configured' warning (#26924).
+    """Auxiliary and fallback defaults follow the canonical V4.1 Flash id."""
 
-    Pinned at the profile layer rather than the legacy
-    `_API_KEY_PROVIDER_AUX_MODELS_FALLBACK` dict — new providers are
-    expected to set `default_aux_model` on `ProviderProfile`, and the
-    fallback dict only exists for providers that predate the profiles
-    system.
-    """
+    def test_profile_advertises_deepseek_flash(self, deepseek_profile):
+        assert deepseek_profile.default_aux_model == "deepseek-flash"
 
-    def test_profile_advertises_deepseek_v4_flash(self, deepseek_profile):
-        assert deepseek_profile.default_aux_model == "deepseek-v4-flash"
+    def test_fallback_models_use_current_canonical(self, deepseek_profile):
+        assert deepseek_profile.fallback_models == ("deepseek-flash",)
 
-    def test_fallback_models_are_v4_only(self, deepseek_profile):
-        assert deepseek_profile.fallback_models == (
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-        )
-
-    def test_consumer_api_returns_deepseek_v4_flash(self):
+    def test_consumer_api_returns_deepseek_flash(self):
         from agent.auxiliary_client import _get_aux_model_for_provider
-        assert _get_aux_model_for_provider("deepseek") == "deepseek-v4-flash"
-
+        assert _get_aux_model_for_provider("deepseek") == "deepseek-flash"
