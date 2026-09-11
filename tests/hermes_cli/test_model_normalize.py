@@ -64,7 +64,6 @@ class TestCopilotModelNormalization:
     the request with HTTP 400 "model_not_supported".
     """
 
-
     def test_openai_codex_still_strips_openai_prefix(self):
         """Regression: openai-codex must still strip the openai/ prefix."""
         assert normalize_model_for_provider("openai/gpt-5.4", "openai-codex") == "gpt-5.4"
@@ -92,39 +91,30 @@ class TestCustomProviderIsNotAVendorIdentity:
 # ── detect_vendor ──────────────────────────────────────────────────────
 
 
-# ── DeepSeek V-series pass-through (bug: V4 models silently folded to V3) ──
+# ── DeepSeek current and V-series pass-through ─────────────────────────
 
 class TestDeepseekVSeriesPassThrough:
-    """DeepSeek's V-series IDs (``deepseek-v4-pro``, ``deepseek-v4-flash``,
-    and future ``deepseek-v<N>-*`` variants) are first-class model IDs
-    accepted directly by DeepSeek's Chat Completions API. Earlier code
-    folded every non-reasoner name into ``deepseek-chat``, which on
-    aggregators (Nous portal, OpenRouter via DeepInfra) routes to V3 —
-    silently downgrading users who picked V4.
-    """
+    """DeepSeek's canonical V4.1 Flash id and explicit V-series ids are
+    first-class model IDs accepted directly by DeepSeek's API."""
 
+    def test_deepseek_provider_preserves_v41_flash(self):
+        result = normalize_model_for_provider("deepseek-flash", "deepseek")
+        assert result == "deepseek-flash"
 
     def test_deepseek_provider_preserves_v4_pro(self):
-        """End-to-end via normalize_model_for_provider — user selecting
-        V4 Pro must reach DeepSeek's API as V4 Pro, not V3 alias."""
         result = normalize_model_for_provider("deepseek-v4-pro", "deepseek")
         assert result == "deepseek-v4-pro"
 
 
-# ── DeepSeek post-2026-07-24 alias remapping ───────────────────────────
+# ── DeepSeek retired alias remapping ────────────────────────────────────
 
 class TestDeepseekCanonicalAndReasonerMapping:
-    """Retired aliases and fuzzy names rewrite to deepseek-v4-flash.
-
-    DeepSeek cut off ``deepseek-chat`` / ``deepseek-reasoner`` on
-    2026-07-24; sending them on the wire returns HTTP 400.
-    """
-
+    """Retired aliases and fuzzy names rewrite to canonical V4.1 Flash."""
 
     def test_provider_path_rewrites_reasoner(self):
         assert (
             normalize_model_for_provider("deepseek-reasoner", "deepseek")
-            == "deepseek-v4-flash"
+            == "deepseek-flash"
         )
 
     @pytest.mark.parametrize("model", [
@@ -134,8 +124,8 @@ class TestDeepseekCanonicalAndReasonerMapping:
         "deepseek-reasoning-preview",
         "deepseek-cot-experimental",
     ])
-    def test_reasoner_keywords_map_to_v4_flash(self, model):
-        assert _normalize_for_deepseek(model) == "deepseek-v4-flash"
+    def test_reasoner_keywords_map_to_v41_flash(self, model):
+        assert _normalize_for_deepseek(model) == "deepseek-flash"
 
 
 # ── Regression: issue #78796 ───────────────────────────────────────────
@@ -186,4 +176,3 @@ class TestIssue78796NvidiaPrefixRepair:
             normalize_model_for_provider("claude-sonnet-4.6", "openrouter")
             == "anthropic/claude-sonnet-4.6"
         )
-
