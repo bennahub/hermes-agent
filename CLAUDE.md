@@ -1,3 +1,9 @@
+<!-- Maintained source: AGENTS.md in this directory. This file mirrors it verbatim below.
+     Claude Code resolves an `@import` against the session working directory, so a root
+     CLAUDE.md containing only `@AGENTS.md` loads nothing when the session starts in a
+     subdirectory. Keeping the text here makes these instructions load from any cwd.
+     Edit AGENTS.md and copy it here; the two must stay byte-identical below this header. -->
+
 # Hermes — repository instructions
 
 ## Scope and architecture
