@@ -536,13 +536,12 @@ def execute_scoped(tool_name: str, arguments: dict, execute: Callable[[dict], An
         return execute(arguments)
     binding = receipt.binding if receipt else get_binding(turn_id)
     if binding is None:
-        # Programmatic callers have no turn. A current owner ingress may run
-        # without a compiled scope; history replay without that ingress may not.
-        if not receipt and not turn_id:
-            return execute(arguments)
-        if _current_owner_ingress(turn_id):
-            return execute(arguments)
-        return _blocked("This command is not from the current owner turn")
+        # No compiled scope for this turn: run the tool directly — there is no
+        # scope to record claims against. Scheduled deliveries, background
+        # reviews, relay lanes, wake-ups and foreground CLI turns all do real
+        # work without a live owner turn. Turns that DID compile a scope keep
+        # exact admission (claims, replay, uncertainty) on the bound path below.
+        return execute(arguments)
     if binding.amendment_pending:
         if not binding.amendment_ready.wait(60):
             return _blocked("Owner amendment admission has not completed; no action was started")

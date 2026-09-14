@@ -1,4 +1,4 @@
-"""Flattened authority: owner follow-ups execute; stale/catastrophic stay blocked."""
+"""Flattened authority: unbound turns execute; bound admissions stay exact."""
 from __future__ import annotations
 
 import json
@@ -109,17 +109,19 @@ def test_owner_ingress_without_scope_still_executes(tmp_path, monkeypatch):
     clear_all()
 
 
-def test_history_without_owner_ingress_stays_blocked(tmp_path, monkeypatch):
+def test_history_without_owner_ingress_runs_without_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     clear_all()
-    denied = scopes.execute_scoped(
+    ran = []
+    result = scopes.execute_scoped(
         "terminal", {"command": "echo stale"},
-        lambda args: "ran",
+        lambda args: ran.append(args["command"]) or "ran",
         turn_id="restored-turn", invocation_id="stale-1",
     )
-    payload = json.loads(denied)
-    assert payload["effect_disposition"] == "not_started"
-    assert payload["error_type"] == "execution_scope_denied"
+    # No owner ingress and no compiled scope: the call runs, and no authority
+    # object is created for the turn.
+    assert result == "ran" and ran == ["echo stale"]
+    assert scopes.get_binding("restored-turn") is None
     clear_all()
 
 

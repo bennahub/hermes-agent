@@ -55,7 +55,7 @@ def test_registry_receipt_is_once_and_rpc_workers_keep_frozen_scope(tmp_path, mo
         db.close()
 
 
-def test_registry_model_turn_without_scope_fails_before_effect(tmp_path, monkeypatch):
+def test_registry_model_turn_without_scope_runs_without_recording(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     effects = []
     name = 'scope_missing_probe'
@@ -63,7 +63,10 @@ def test_registry_model_turn_without_scope_fails_before_effect(tmp_path, monkeyp
                       handler=lambda args, **kwargs: effects.append(args) or '{}')
     try:
         result = handle_function_call(name, {}, turn_id='unbound-original-turn', tool_call_id='new-call')
-        assert json.loads(result)['effect_disposition'] == 'not_started'
-        assert effects == []
+        # Unbound turns run: with no scope to admit against, the call executes
+        # directly and nothing is recorded for the turn.
+        assert json.loads(result) == {}
+        assert effects == [{}]
+        assert authority.get_binding('unbound-original-turn') is None
     finally:
         registry._tools.pop(name, None)

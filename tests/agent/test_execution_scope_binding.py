@@ -33,7 +33,7 @@ def _policy(monkeypatch):
     return compiled
 
 
-def test_compaction_restore_has_no_authority_and_new_identical_owner_source_does(tmp_path, monkeypatch):
+def test_compaction_restore_runs_without_authority_and_new_identical_owner_source_compiles(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     compiled = _policy(monkeypatch)
     db = SessionDB(tmp_path / 'state.db')
@@ -75,9 +75,11 @@ def test_compaction_restore_has_no_authority_and_new_identical_owner_source_does
         agent = _agent(db, 'restored-turn')
         scopes.bind_agent_turn(agent, restored, {'role': 'user', 'content': old, '_row_id': original['_row_id']})
         assert scopes.get_binding('restored-turn') is None
-        assert json.loads(run(old, 'restored-turn', 'replay-call'))['effect_disposition'] == 'not_started'
+        # Unbound recorded-history replays RUN (no owner turn required) and
+        # record nothing: no scope, no claim, no change to the closed action.
+        assert json.loads(run(old, 'restored-turn', 'replay-call'))['exit_code'] == 0
         assert compiled == [old]
-        # Repeated compaction and native DB reconstruction cannot create new
+        # Repeated compaction and native DB reconstruction still cannot create
         # authority or change the completed action, even with history visible.
         prior_action = db.get_scope_action(old_scope, 'turn:old-turn:call:old-call')
         for cycle in range(3):
@@ -90,10 +92,10 @@ def test_compaction_restore_has_no_authority_and_new_identical_owner_source_does
             replay_agent = _agent(db, replay_turn)
             scopes.bind_agent_turn(replay_agent, restored, original)
             assert scopes.get_binding(replay_turn) is None
-            assert json.loads(run(old, replay_turn, 'fresh-replay-call'))['effect_disposition'] == 'not_started'
+            assert json.loads(run(old, replay_turn, 'fresh-replay-call'))['exit_code'] == 0
             assert db.get_scope(old_scope)['state'] == 'closed'
             assert db.get_scope_action(old_scope, 'turn:old-turn:call:old-call') == prior_action
-            assert compiled == [old] and effects == [old]
+            assert compiled == [old] and effects == [old] * (3 + cycle)
             scopes.close_turn(replay_agent)
         agent = _agent(db, 'financial-turn')
         new_row = _row(db, current)
@@ -108,7 +110,7 @@ def test_compaction_restore_has_no_authority_and_new_identical_owner_source_does
         scopes.bind_agent_turn(agent, old, repeated_row)
         assert scopes.get_binding('fresh-identical-turn').scope_id != old_scope
         assert json.loads(run(old, 'fresh-identical-turn', 'fresh-call'))['exit_code'] == 0
-        assert effects == [old, current, old]
+        assert effects == [old] * 5 + [current, old]
         scopes.close_turn(agent)
     finally:
         db.close()
