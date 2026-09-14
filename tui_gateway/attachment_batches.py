@@ -330,7 +330,7 @@ def _decode(items):
                 f"These attachments come to more than the {MAX_BATCH_BYTES // (1024 * 1024)} MB "
                 "limit for one message.")
         if kind == "image":
-            _admit_image(item_id, name, mime, data)
+            mime = _admit_image(item_id, name, mime, data)
         decoded.append((item_id, name, mime, kind, data))
     return decoded
 
@@ -339,11 +339,13 @@ def _decode(items):
 # type of the file. A camera still carrying an MPF multi-picture segment -- what
 # every recent iPhone writes for an HDR gain map -- opens through the
 # multi-picture reader while staying an ordinary JPEG to the filesystem, to the
-# picker that chose it, and to the model provider that will read it. Comparing
-# the reader's own MIME against the file's declared type refuses that photo.
-# Only readers whose registered MIME is not the wire type belong here; a reader
-# Pillow already names correctly (DIB is registered image/bmp) needs no entry.
-_IMAGE_READER_MIME = {"MPO": "image/jpeg"}
+# picker that chose it, and to the model provider that will read it. The HEIF
+# reader (pillow-heif, when installed) opens the whole HEIC/HEIF family and
+# registers it as image/heif, while the signature table the vision path trusts
+# names that family image/heic. Only readers whose registered MIME is not the
+# wire type belong here; a reader Pillow already names correctly (DIB is
+# registered image/bmp) needs no entry.
+_IMAGE_READER_MIME = {"MPO": "image/jpeg", "HEIF": "image/heic"}
 
 # Wire synonyms clients legitimately send for the same bytes.
 _IMAGE_MIME_SYNONYMS = {
@@ -361,10 +363,11 @@ def _canonical_image_mime(value):
 def supported_image_mime_types():
     """Image wire types this build can actually read, for client pre-flight.
 
-    Derived from the installed decoders, not a hand-kept list, so what is
-    advertised cannot drift from what admission accepts. A client that knows
-    the server has no HEIF decoder can ask iOS for a JPEG at the picker instead
-    of uploading megabytes that will be refused.
+    Derived from the installed decoders, not a hand-kept list. A client that
+    knows the server has no HEIF decoder can ask iOS for a JPEG at the picker
+    instead of uploading a still the vision path will skip. Admission itself
+    is broader than this list: any bytes a reader opens, or a signature
+    recognises, are accepted with the stored type read off the bytes.
     """
     try:
         from PIL import Image
@@ -398,11 +401,10 @@ def _reader_wire_mime(reader):
     """The wire type this build registers for a reader, or ``None`` if it has none.
 
     ``None`` is not "anything goes". A reader this build cannot name a wire type
-    for corroborates no declared type at all, and in Pillow 12.3 that is 23 of
+    for corroborates no declared type either, and in Pillow 12.3 that is 23 of
     the 43 installed readers -- DDS, QOI, WMF, MSP, IM, SPIDER and the rest. The
-    caller must refuse those: decodability alone is not the safety property here,
-    because the declared type is what gets stored on the durable record and what
-    the file route later serves the bytes back as.
+    caller stores a type synthesised from the reader's own name instead -- never
+    the declared label -- so the durable record and the file route stay truthful.
     """
     from PIL import Image
     if reader in _IMAGE_READER_MIME:
@@ -411,31 +413,42 @@ def _reader_wire_mime(reader):
     return _canonical_image_mime(Image.MIME.get(reader)) or None
 
 
+def _sniff_image_mime(data):
+    """The wire type this build's image signatures recognise in the bytes, or ``None``.
+
+    The signature table is ``agent.image_routing``'s -- one table for admission
+    and the vision path -- so a format recognised here is one the rest of the
+    pipeline also knows. SVG stays a document: it is vector markup the vision
+    path skips by design, and text served back as an image is the type
+    confusion these checks exist to prevent.
+    """
+    from agent.image_routing import _sniff_mime_from_bytes
+    mime = _sniff_mime_from_bytes(data)
+    return mime if mime and mime != "image/svg+xml" else None
+
+
 def _admit_image(item_id, name, mime, data):
-    """The bytes must decode as an image and belong to the type they claim."""
-    declared = _canonical_image_mime(mime)
-    subtype = (declared.split("/", 1)[-1] or "image").upper()
+    """Admit any image these bytes support; return the wire type to store.
+
+    The stored type is read off the bytes, never trusted from the declared
+    label: iOS answers a requested JPEG with PNG bytes for some screenshots,
+    and the send must not be lost to a mismatch -- nor may the durable record
+    wear a type its bytes contradict. A signature match admits formats no
+    reader opens in this build, like iPhone HEIC originals, while a file whose
+    type this build can indeed decode is still answered as damaged when the
+    reader cannot open it. Only bytes no reader opens and no signature claims
+    are refused.
+    """
     reader = _image_reader(data)
-    if reader is None:
-        if declared in supported_image_mime_types():
-            # This build does read the declared type, so "send it as JPEG or
-            # PNG" would be telling the Owner to resend a JPEG as a JPEG. The
-            # bytes are what failed, and only they can be changed.
-            raise ItemRefused(
-                f'"{name}" could not be read as an image. This server does read {subtype}, '
-                f"so what arrived is damaged, incomplete, or not really a {subtype}. "
-                "Re-export it and send it again.",
-                item_id=item_id, filename=name, code="image_unreadable")
-        raise ItemRefused(
-            f'"{name}" is a {subtype} image, which this server cannot read. '
-            "Send it as JPEG or PNG and it will go through.",
-            item_id=item_id, filename=name, code="image_format_unsupported")
-    actual = _reader_wire_mime(reader)
-    if actual != declared:
-        raise ItemRefused(
-            f'"{name}" is sent as {mime} but its bytes are {actual or reader + " data"}. '
-            "Re-export the image and send it again.",
-            item_id=item_id, filename=name, code="image_type_mismatch")
+    if reader is not None:
+        return _reader_wire_mime(reader) or f"image/{reader.lower()}"
+    guessed = _sniff_image_mime(data)
+    if guessed is not None and guessed not in supported_image_mime_types():
+        return guessed
+    raise ItemRefused(
+        f'"{name}" could not be read as an image. What arrived is damaged, '
+        "incomplete, or not really a picture. Re-export it and send it again.",
+        item_id=item_id, filename=name, code="image_unreadable")
 
 
 def _digest(value):

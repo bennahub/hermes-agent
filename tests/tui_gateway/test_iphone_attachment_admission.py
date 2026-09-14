@@ -3,7 +3,8 @@
 The corpus that shipped the admission rule used synthetic images only, so the
 one case a phone actually produces -- a camera still whose JPEG carries an MPF
 multi-picture segment -- was never sent through it. These tests send the files a
-picker really hands over, and hold the one-message invariant while doing it.
+picker really hands over, hold the one-message invariant while doing it, and pin
+the rule that replaced label-trust: the bytes decide the stored type.
 """
 import base64
 from io import BytesIO
@@ -44,8 +45,18 @@ def plain_jpeg():
 
 
 def heic_still():
-    """An unconvertible iPhone original: no HEIF decoder is installed."""
+    """An iPhone original: a file whose ftyp box declares the HEIC brand."""
     return b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1" + b"\x00" * 512
+
+
+def not_an_image():
+    """Bytes no reader opens and no signature claims."""
+    return b"this is not an image, it is a sentence"
+
+
+def junk_image(name):
+    """An item the server is right to refuse, under whatever name it arrived."""
+    return item(not_an_image(), name, "image", "image/heic")
 
 
 def photo(name="IMG_4821.JPG", mime="image/jpeg"):
@@ -108,6 +119,16 @@ def test_every_honest_name_for_one_camera_still_is_admitted(tmp_path, declared):
                          [photo(mime=declared)])["state"] == "staged"
 
 
+def test_a_png_screenshot_declared_jpeg_is_stored_as_the_png_it_is(tmp_path):
+    """The Owner's failing send: iOS handed PNG bytes back under an image/jpeg label."""
+    mid = str(uuid4())
+    staged = batches.stage(tmp_path, "alpha", "chat", mid, mid,
+                           [item(plain_png(), "image.png", "image", "image/jpeg")])
+    assert staged["state"] == "staged"
+    record = staged["attachments"][0]
+    assert record["mime_type"] == "image/png" and record["kind"] == "image"
+
+
 # ── the rest of the picker's output ─────────────────────────────────────────
 
 def test_pdf_with_text_is_one_owner_turn(rpc):
@@ -130,6 +151,22 @@ def test_photo_and_pdf_and_text_is_one_ordered_owner_turn(rpc):
     assert "error" not in submit(server, mid, entries)
     envelope = one_owner_turn(session, mid, entries)
     assert envelope["text"].index("1. IMG_4821.JPG") < envelope["text"].index("2. quote.pdf")
+
+
+def test_an_iphone_heic_still_is_admitted_by_its_signature(rpc):
+    """No HEIF decoder required: the ftyp brand is a fact of the bytes."""
+    server, session = rpc
+    mid = str(uuid4()); entries = [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")]
+    assert "error" not in submit(server, mid, entries)
+    one_owner_turn(session, mid, entries)
+
+
+def test_a_heic_still_keeps_one_stored_name_across_decoder_installs(tmp_path):
+    """With or without a HEIF plugin, the record carries the bytes' own type."""
+    mid = str(uuid4())
+    staged = batches.stage(tmp_path, "alpha", "chat", mid, mid,
+                           [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")])
+    assert staged["attachments"][0]["mime_type"] == "image/heic"
 
 
 def test_reply_target_and_caption_reach_the_turn_and_bind_the_identity(rpc, monkeypatch):
@@ -219,20 +256,20 @@ def test_stale_local_draft_cannot_change_the_files_behind_one_identity(tmp_path)
         batches.stage(tmp_path, "alpha", "chat", mid, mid, [photo(), pdf()])
 
 
-# ── a genuinely unsupported item names itself ───────────────────────────────
+# ── an item no reader can open names itself ─────────────────────────────────
 
 def test_unreadable_still_names_the_file_and_says_what_to_do(rpc):
     server, session = rpc
     mid = str(uuid4())
-    entries = [pdf(), item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")]
+    entries = [pdf(), junk_image("IMG_4822.HEIC")]
     result = submit(server, mid, entries)
     error = result["error"]
     assert error["code"] == 4004
     refusal = error["data"]["attachment_batch"]["refusal"]
     assert refusal["filename"] == "IMG_4822.HEIC"
     assert refusal["item_id"] == entries[1]["item_id"]
-    assert refusal["code"] == "image_format_unsupported"
-    assert "IMG_4822.HEIC" in error["message"] and "JPEG or PNG" in error["message"]
+    assert refusal["code"] == "image_unreadable"
+    assert "IMG_4822.HEIC" in error["message"] and "re-export" in error["message"].lower()
     assert error["message"] != batches.GENERIC_REFUSAL
     assert "queued_prompt" not in session, "a refused batch must start no turn"
 
@@ -241,7 +278,7 @@ def test_retry_of_a_refused_identity_repeats_the_same_named_reason(rpc):
     """Retry is offered, so it must not decay into "not admitted" on attempt two."""
     server, session = rpc
     mid = str(uuid4())
-    entries = [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")]
+    entries = [junk_image("IMG_4822.HEIC")]
     first = submit(server, mid, entries)["error"]
     again = submit(server, mid, entries)["error"]
     assert again["message"] == first["message"] != batches.GENERIC_REFUSAL
@@ -249,25 +286,37 @@ def test_retry_of_a_refused_identity_repeats_the_same_named_reason(rpc):
     assert again["data"]["attachment_batch"]["retry_with_new_identity"] is True
 
 
-def test_a_fresh_identity_after_converting_the_photo_goes_through(rpc):
+def test_a_fresh_identity_after_fixing_the_file_goes_through(rpc):
     """The Owner's route back: swap the file the refusal named, send again."""
     server, session = rpc
     refused = str(uuid4())
-    submit(server, refused, [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")])
+    submit(server, refused, [junk_image("IMG_4822.HEIC")])
     fixed = str(uuid4()); entries = [item(plain_png(), "IMG_4822.png", "image", "image/png")]
     assert "error" not in submit(server, fixed, entries)
     one_owner_turn(session, fixed, entries)
 
 
-# ── the honesty rule the fix must not have loosened ─────────────────────────
+# ── the bytes, not the label, decide the stored type ────────────────────────
+
+@pytest.mark.parametrize("name,mime,data,stored", [
+    ("image.png", "image/jpeg", plain_png(), "image/png"),   # PNG wearing a JPEG label
+    ("IMG_2.png", "image/png", plain_jpeg(), "image/jpeg"),  # the reverse
+], ids=["png-as-jpeg", "jpeg-as-png"])
+def test_bytes_that_contradict_their_declared_type_are_stored_as_what_they_are(tmp_path, name, mime, data, stored):
+    """The send goes through, and the record keeps the type the bytes actually are."""
+    mid = str(uuid4())
+    staged = batches.stage(tmp_path, "alpha", "chat", mid, mid, [item(data, name, "image", mime)])
+    assert staged["state"] == "staged"
+    record = staged["attachments"][0]
+    assert record["mime_type"] == stored and record["kind"] == "image"
+
 
 @pytest.mark.parametrize("name,mime,data", [
-    ("IMG_1.jpg", "image/jpeg", plain_png()),        # PNG wearing a JPEG label
-    ("IMG_2.png", "image/png", iphone_camera_still()),
     ("note.png", "image/png", b"#!/bin/sh\necho not-an-image\n"),
     ("empty.png", "image/png", b""),
-], ids=["png-as-jpeg", "jpeg-as-png", "script-as-png", "empty-as-png"])
-def test_bytes_that_contradict_their_declared_type_are_still_refused(tmp_path, name, mime, data):
+    ("IMG_3.HEIC", "image/heic", not_an_image()),
+], ids=["script-as-png", "empty-as-png", "junk-as-heic"])
+def test_bytes_no_reader_opens_and_no_signature_claims_are_still_refused(tmp_path, name, mime, data):
     mid = str(uuid4())
     with pytest.raises(batches.BatchError):
         batches.stage(tmp_path, "alpha", "chat", mid, mid, [item(data, name, "image", mime)])
@@ -280,18 +329,21 @@ def test_capabilities_advertise_only_types_admission_can_read(rpc):
     server, _ = rpc
     advertised = server._methods["attachments.capabilities"]("c", {})["result"]["image_mime_types"]
     assert "image/jpeg" in advertised and "image/png" in advertised
-    # Nothing is advertised that admission would then refuse.
-    assert "image/heic" not in advertised and "image/heif" not in advertised
     assert "image/mpo" not in advertised, "the reader's name is not a wire type"
+    # HEIC joins this list only when a HEIF plugin is installed: the list names
+    # what this build decodes in full, not everything admission accepts
+    # (admission is deliberately broader -- signature tests above). The
+    # list-to-readers relation is pinned in
+    # test_no_advertised_image_type_is_one_admission_cannot_corroborate.
 
 
-# ── a decoder without a registered wire type is not a licence ───────────────
+# ── a decoder without a registered wire type keeps its own name ─────────────
 #
 # Pillow 12.3 installs 43 readers and registers a MIME for only 20 of them.
 # The 23 unnamed ones (DDS, QOI, WMF, MSP, IM, SPIDER, ...) decode perfectly
-# well, so "it decoded" alone would let any of them wear any image label -- and
-# the label, not the reader, is what is stored on the durable record and what
-# the file route later serves the bytes back as.
+# well -- and "it decoded" is not evidence for a declared label, so the record
+# carries the reader's own name (image/dds, image/qoi) instead of a label it
+# cannot corroborate. The name is truthful; it is simply never advertised.
 
 def encoded(fmt, mode="RGB", size=(8, 8)):
     """Bytes a Pillow reader with no registered MIME entry will open."""
@@ -304,28 +356,14 @@ UNNAMED_READERS = ["DDS", "QOI", "IM", "SPIDER"]
 
 
 @pytest.mark.parametrize("fmt", UNNAMED_READERS)
-def test_a_reader_without_a_wire_type_cannot_wear_an_image_label(tmp_path, fmt):
-    """These decode. That is not evidence they are the PNG they claim to be."""
+def test_a_reader_without_a_wire_type_is_stored_under_its_own_name(tmp_path, fmt):
+    """Decodable, so admitted -- under the reader's name, not the PNG it claims."""
     mid = str(uuid4())
     entry = item(encoded(fmt), "pretty.png", "image", "image/png")
-    with pytest.raises(batches.BatchError) as caught:
-        batches.stage(tmp_path, "alpha", "chat", mid, mid, [entry])
-    refusal = batches.refusal_of(caught.value)
-    assert refusal["code"] == "image_type_mismatch"
-    assert refusal["filename"] == "pretty.png" and refusal["item_id"] == entry["item_id"]
-    assert fmt in refusal["reason"], "the Owner is told what the bytes actually are"
-    published = tmp_path / "artifacts" / "published"
-    assert [p.name for p in published.glob("*") if not p.name.startswith("index.db")] == []
-
-
-@pytest.mark.parametrize("fmt", UNNAMED_READERS)
-def test_a_reader_without_a_wire_type_is_never_admitted_at_all(tmp_path, fmt):
-    """Nor under a name invented for it: no such type is advertised as readable."""
-    mid = str(uuid4())
-    with pytest.raises(batches.BatchError):
-        batches.stage(tmp_path, "alpha", "chat", mid, mid,
-                      [item(encoded(fmt), f"x.{fmt.lower()}", "image", f"image/{fmt.lower()}")])
-    assert f"image/{fmt.lower()}" not in batches.supported_image_mime_types()
+    staged = batches.stage(tmp_path, "alpha", "chat", mid, mid, [entry])
+    assert staged["attachments"][0]["mime_type"] == f"image/{fmt.lower()}"
+    assert f"image/{fmt.lower()}" not in batches.supported_image_mime_types(), \
+        "a name invented for the record is never advertised as readable"
 
 
 def test_no_advertised_image_type_is_one_admission_cannot_corroborate():
@@ -359,17 +397,6 @@ def test_a_damaged_jpeg_is_not_told_to_resend_itself_as_a_jpeg(tmp_path):
     assert "re-export" in refusal["reason"].lower()
 
 
-def test_a_type_with_no_decoder_still_says_which_types_do_work(tmp_path):
-    """The other half of the split: HEIC really cannot be read here."""
-    mid = str(uuid4())
-    with pytest.raises(batches.BatchError) as caught:
-        batches.stage(tmp_path, "alpha", "chat", mid, mid,
-                      [item(heic_still(), "IMG.HEIC", "image", "image/heic")])
-    refusal = batches.refusal_of(caught.value)
-    assert refusal["code"] == "image_format_unsupported"
-    assert "JPEG or PNG" in refusal["reason"]
-
-
 # ── a sealed identity never names a file that is not in the send ────────────
 
 def test_resending_a_refused_identity_with_fixed_files_names_no_stale_file(rpc):
@@ -377,7 +404,7 @@ def test_resending_a_refused_identity_with_fixed_files_names_no_stale_file(rpc):
     then answer that resend with the name of a file that is no longer there."""
     server, session = rpc
     mid = str(uuid4())
-    bad = [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")]
+    bad = [junk_image("IMG_4822.HEIC")]
     first = submit(server, mid, bad)["error"]
     assert first["data"]["attachment_batch"]["refusal"]["filename"] == "IMG_4822.HEIC"
 
@@ -397,8 +424,8 @@ def test_a_second_bad_file_under_a_sealed_identity_names_the_second_file(rpc):
     """Re-evaluated, not replayed: the reason describes what was just sent."""
     server, _ = rpc
     mid = str(uuid4())
-    submit(server, mid, [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")])
-    other = [item(heic_still(), "IMG_9001.HEIC", "image", "image/heic")]
+    submit(server, mid, [junk_image("IMG_4822.HEIC")])
+    other = [junk_image("IMG_9001.HEIC")]
     error = submit(server, mid, other)["error"]
     refusal = error["data"]["attachment_batch"]["refusal"]
     assert refusal["filename"] == "IMG_9001.HEIC" == error["message"].split('"')[1]
@@ -411,7 +438,7 @@ def test_a_submit_on_a_sealed_identity_names_no_file_it_cannot_see(tmp_path):
     mid = str(uuid4())
     try:
         batches.stage(tmp_path, "alpha", "chat", mid, mid,
-                      [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")])
+                      [junk_image("IMG_4822.HEIC")])
     except batches.BatchError as exc:
         assert batches.seal_refusal(tmp_path, "chat", mid, mid, batches.refusal_of(exc))
     with pytest.raises(batches.RefusedBatch) as caught:
@@ -424,7 +451,7 @@ def test_a_submit_on_a_sealed_identity_names_no_file_it_cannot_see(tmp_path):
 def test_the_stored_reason_survives_for_the_resend_that_repeats_the_same_file(tmp_path):
     """The accepted improvement is untouched: same file, same sentence."""
     mid = str(uuid4())
-    entries = [item(heic_still(), "IMG_4822.HEIC", "image", "image/heic")]
+    entries = [junk_image("IMG_4822.HEIC")]
     reasons = []
     for _ in range(3):
         try:

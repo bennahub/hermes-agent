@@ -49,17 +49,19 @@ When a previous process dies between copies, a later pre-admission refusal also
 removes the batch's complete private execution namespace. Post-dispatch states are
 ineligible for this cleanup, so accepted/shared data remains untouched.
 
-An image is admitted when its bytes decode and belong to the type the client
-declared. The comparison is by wire type, not by the name of the reader that
-opened the bytes: a camera still carrying an MPF multi-picture segment — what a
-current iPhone writes for an HDR gain map — is a JPEG, and `image/jpg`,
-`image/mpo` and the other honest synonyms name the same bytes. Bytes that
-contradict their declared type, that no installed decoder can read, or that
-decode only through a reader this build cannot name a wire type for, are all
-refused. Decoding is necessary and not sufficient: the declared type is what is
-kept on the durable record and what the file route serves the bytes back as, so
-a type no installed decoder corroborates is never admitted. The declared type is
-preserved on that record; Hermes does not relabel bytes it accepted.
+An image is admitted when its bytes decode, or carry an image signature this
+build recognises. The type kept on the durable record — and served back by the
+file route — is read off the bytes, never trusted from the client's label: iOS
+hands PNG bytes back for some screenshots requested as `image/jpeg`, and the
+send goes through with the record corrected to `image/png`. Wire-type spelling
+still decides by drawn type, not by the reader's name: a camera still carrying
+an MPF multi-picture segment — what a current iPhone writes for an HDR gain map
+— is a JPEG, and `image/jpg`, `image/mpo` and the other honest synonyms name the
+same bytes. Formats this build cannot decode in full are accepted on signature
+alone (an iPhone HEIC original is admitted as `image/heic`); a reader with no
+registered wire type stores the reader's own name (`image/dds`), never a label
+it cannot corroborate. Only bytes that neither decode nor match a signature are
+refused.
 
 A refusal that one named item caused carries that item in the error:
 `attachment_batch.refusal` is `{reason, code, item_id, filename}`, and the RPC
@@ -76,15 +78,18 @@ fact still true — the identity is spent, so send a new message (`identity_refu
 with `item_id` and `filename` null). A resend whose *new* files are themselves
 inadmissible is answered for those files, not for the previous attempt's. A
 refusal with no single responsible item omits `refusal` and keeps the generic
-wording. Codes in use: `image_format_unsupported` (no decoder for the declared
-type), `image_unreadable` (the declared type is readable here, these bytes were
-not), `image_type_mismatch`, `mime_invalid`, `item_too_large`, `item_empty`,
-`data_corrupt`, `identity_refused`.
+wording. Codes in use: `image_unreadable` (no reader opens these bytes and no
+signature claims them), `mime_invalid`, `item_too_large`, `item_empty`,
+`data_corrupt`, `identity_refused`. The former `image_format_unsupported` and
+`image_type_mismatch` are retired with label-trust: a recognised image is
+admitted under its true type instead of being refused.
 
 `attachments.capabilities` additionally reports `image_mime_types`: the image
-wire types this build can actually decode, derived from the installed decoders.
-A client should convert at the picker rather than upload a photo admission would
-refuse — a build with no HEIF decoder does not list `image/heic`.
+wire types this build decodes in full, derived from the installed decoders. A
+client should still convert at the picker when its file's type is absent — a
+build with no HEIF decoder does not list `image/heic` — though no upload is
+refused on that ground any more; the stored record simply says what the bytes
+are.
 
 Push eligibility and unread eligibility both evaluate the same `owner_attention`
 predicate with the actual message role and content. Blank, silent, and peer-only
